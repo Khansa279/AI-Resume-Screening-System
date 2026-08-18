@@ -1,0 +1,122 @@
+================================================================================
+                         JOB DESCRIPTION
+================================================================================
+
+POSITION:       Associate AI Engineer
+COMPANY:        CureMD
+LOCATION:       [Location from the LinkedIn posting]
+EXPERIENCE:     0-1 years
+EMPLOYMENT:     Full-time
+
+================================================================================
+                         ABOUT THE COMPANY
+================================================================================
+
+CureMD is a healthcare technology company focused on developing innovative
+technology solutions that transform healthcare and support healthcare
+professionals in delivering better patient care.
+
+================================================================================
+                         ROLE OVERVIEW
+================================================================================
+
+Join CureMD as an Associate AI Engineer, where you'll begin your journey in
+building innovative Artificial Intelligence solutions that power next-generation
+intelligent systems. Working alongside experienced AI engineers and researchers,
+you will contribute to the development, testing, and deployment of AI and
+Machine Learning models while continuously enhancing your technical expertise.
+
+This role is ideal for fresh graduates and early-career professionals who are
+passionate about AI, eager to learn, and excited to solve real-world challenges
+through technology.
+
+================================================================================
+                         RESPONSIBILITIES
+================================================================================
+
+- Assist in designing, developing, testing, and deploying AI and Machine
+  Learning solutions under the guidance of senior engineers.
+
+- Support data preparation, model training, evaluation, and optimization for
+  AI applications.
+
+- Collaborate with cross-functional teams to develop AI-driven solutions for
+  real-world business challenges.
+
+- Write clean, efficient, and well-documented code following engineering
+  best practices.
+
+- Participate in research, experimentation, and proof-of-concept development
+  using modern AI technologies.
+
+- Stay updated with emerging AI trends and contribute to knowledge-sharing
+  and continuous learning initiatives.
+
+- Support technical documentation while adhering to software engineering
+  standards and professional ethics.
+
+================================================================================
+                         REQUIRED QUALIFICATIONS (STRICT)
+================================================================================
+
+- Bachelor's degree in Computer Science, Artificial Intelligence, Data Science,
+  Software Engineering, or a related field.
+
+- 0-1 year of experience in AI, Machine Learning, Data Science, or Software
+  Development. Fresh graduates are encouraged to apply.
+
+- Basic understanding of Machine Learning, Deep Learning, and Artificial
+  Intelligence concepts.
+
+- Familiarity with Python and AI/ML frameworks such as Scikit-learn,
+  TensorFlow, or PyTorch.
+
+================================================================================
+                         TECHNICAL SKILLS
+================================================================================
+
+- Python
+- Machine Learning
+- Deep Learning
+- Artificial Intelligence
+- Scikit-learn
+- TensorFlow
+- PyTorch
+- Data Structures
+- Algorithms
+- SQL
+- Git / Version Control
+
+================================================================================
+                         PREFERRED QUALIFICATIONS
+================================================================================
+
+- Knowledge of data structures, algorithms, SQL, and version control (Git).
+
+- Strong analytical and problem-solving skills.
+
+- Strong communication and teamwork skills.
+
+- Internship, academic, or personal AI/ML projects.
+
+================================================================================
+                         WHAT YOU'LL DO
+================================================================================
+
+- Contribute to AI and Machine Learning solutions.
+- Assist with model development and evaluation.
+- Work with data preparation and optimization.
+- Participate in AI research and experimentation.
+- Collaborate with engineering and cross-functional teams.
+- Contribute to real-world AI solutions in healthcare technology.
+
+================================================================================
+                         IMPORTANT NOTES
+================================================================================
+
+- This is an entry-level / early-career position.
+- Fresh graduates are encouraged to apply.
+- Internship, academic, and personal AI/ML projects are considered an advantage.
+- The role focuses on learning, development, and contribution to AI/ML projects.
+
+================================================================================
