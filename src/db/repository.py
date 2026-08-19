@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 
 from . import models
@@ -460,3 +461,28 @@ def get_latest_ranking(db: Session, job_description_id: int) -> Optional[models.
         .order_by(models.Ranking.generated_at.desc())
     )
     return db.scalars(stmt).first()
+
+def get_ranking_with_details(db: Session, ranking_id: int) -> Optional[models.Ranking]:
+    """Like get_latest_ranking, but eager-loads the full chain needed to
+    display a ranking (entries -> screening -> resume -> candidate,
+    result, explanation) so the returned object is safe to read from
+    AFTER the session that fetched it has closed. Use this whenever a
+    caller (like screen_position) needs to hand a Ranking back across a
+    `with get_session()` boundary."""
+    stmt = (
+        select(models.Ranking)
+        .where(models.Ranking.id == ranking_id)
+        .options(
+            selectinload(models.Ranking.entries)
+            .selectinload(models.RankingEntry.screening)
+            .selectinload(models.Screening.resume)
+            .selectinload(models.Resume.candidate),
+            selectinload(models.Ranking.entries)
+            .selectinload(models.RankingEntry.screening)
+            .selectinload(models.Screening.result),
+            selectinload(models.Ranking.entries)
+            .selectinload(models.RankingEntry.screening)
+            .selectinload(models.Screening.explanation),
+        )
+    )
+    return db.scalar(stmt)
