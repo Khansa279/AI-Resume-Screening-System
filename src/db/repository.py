@@ -40,6 +40,11 @@ def create_organization(db: Session, name: str) -> models.Organization:
 def get_organization(db: Session, organization_id: int) -> Optional[models.Organization]:
     return db.get(models.Organization, organization_id)
 
+def get_organization_by_name(db: Session, name: str) -> Optional[models.Organization]:
+    """Lookup by the column that already carries a UNIQUE constraint, so
+    callers can do get-or-create at the call site instead of hitting
+    IntegrityError on repeat runs. Constraint itself is untouched."""
+    return db.scalar(select(models.Organization).where(models.Organization.name == name))
 
 def list_organizations(db: Session) -> list[models.Organization]:
     return list(db.scalars(select(models.Organization)))
@@ -74,7 +79,27 @@ def list_positions(db: Session, department_id: int) -> list[models.Position]:
 def get_position(db: Session, position_id: int) -> Optional[models.Position]:
     return db.get(models.Position, position_id)
 
+def get_department_by_name(db: Session, organization_id: int, name: str) -> Optional[models.Department]:
+    """Matches the existing uq_dept_org_name constraint shape
+    (organization_id, name) -- same get-or-create purpose."""
+    stmt = (
+        select(models.Department)
+        .where(models.Department.organization_id == organization_id)
+        .where(models.Department.name == name)
+    )
+    return db.scalar(stmt)
 
+def get_position_by_title(db: Session, department_id: int, title: str) -> Optional[models.Position]:
+    """Positions have no UNIQUE constraint on (department_id, title) in
+    the current schema, so this doesn't enforce dedup at the DB level --
+    it just lets callers that want dedup behavior (test/seed scripts)
+    opt into it without a schema change."""
+    stmt = (
+        select(models.Position)
+        .where(models.Position.department_id == department_id)
+        .where(models.Position.title == title)
+    )
+    return db.scalar(stmt)
 # ============================================================================
 # Job Description + Requirements
 # ============================================================================

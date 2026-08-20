@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+import re
 
 # PDF parsing
 try:
@@ -19,6 +20,15 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PRIVATE_USE_PATTERN = re.compile(r"[\uE000-\uF8FF]")
+_ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
 @dataclass
 class ParseResult:
@@ -35,6 +45,9 @@ class DocumentParser:
     """Parse PDF and DOCX documents to extract text content."""
     
     SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt"}
+    
+    MIN_MEANINGFUL_CHARS = 40
+    
     
     def __init__(self):
         """Initialize the document parser."""
@@ -105,48 +118,101 @@ class DocumentParser:
                 error_message=f"Error parsing file: {str(e)}",
                 confidence=0.0
             )
-    
+    @staticmethod
+    def _sanitize_extracted_text(text: str) -> str:
+        """Remove extraction artifacts (control bytes, icon-font glyphs,
+        zero-width chars) that were never legible text -- doesn't touch
+        real words or wording."""
+        if not text:
+            return text
+        text = _CONTROL_CHAR_PATTERN.sub("", text)
+        text = _PRIVATE_USE_PATTERN.sub(" ", text)
+        text = _ZERO_WIDTH_PATTERN.sub("", text)
+        return text
+
     def _parse_pdf(self, path: Path) -> ParseResult:
-        """Parse a PDF file."""
         if not PDF_AVAILABLE:
             return ParseResult(
-                text="",
-                file_type="pdf",
-                success=False,
+                text="", file_type="pdf", success=False,
                 error_message="PyPDF2 not installed. Run: pip install PyPDF2",
-                confidence=0.0
+                confidence=0.0,
             )
-        
+
+        pypdf2_text, pypdf2_pages, _ = self._extract_with_pypdf2(path)
+        pypdf2_text = self._sanitize_extracted_text(pypdf2_text)
+        best_text, page_count = pypdf2_text, pypdf2_pages
+
+        if self._alpha_char_count(best_text) < self.MIN_MEANINGFUL_CHARS and PDFPLUMBER_AVAILABLE:
+            plumber_text, plumber_pages, _ = self._extract_with_pdfplumber(path)
+            plumber_text = self._sanitize_extracted_text(plumber_text)
+            if self._alpha_char_count(plumber_text) > self._alpha_char_count(best_text):
+                best_text, page_count = plumber_text, (plumber_pages or page_count)
+
+        if self._alpha_char_count(best_text) < self.MIN_MEANINGFUL_CHARS:
+            tried = "PyPDF2" + (" and pdfplumber" if PDFPLUMBER_AVAILABLE else "")
+            return ParseResult(
+                text="", file_type="pdf", page_count=page_count, success=False,
+                error_message=f"No meaningful text extracted (tried {tried}). Likely a scanned image PDF; OCR not currently implemented.",
+                confidence=0.0,
+            )
+
+        return ParseResult(
+            text=best_text, file_type="pdf", page_count=page_count,
+            success=True, confidence=self._estimate_extraction_confidence(best_text),
+        )
+
+    def _extract_with_pypdf2(self, path: Path) -> tuple[str, int, str]:
+        try:
+            reader = PdfReader(str(path))
+            pages = [p.extract_text() or "" for p in reader.pages]
+            return "\n\n".join(t for t in pages if t), len(reader.pages), ""
+        except Exception as e:
+            return "", 0, str(e)
+
+    def _extract_with_pdfplumber(self, path: Path) -> tuple[str, int, str]:
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                pages = [p.extract_text() or "" for p in pdf.pages]
+                return "\n\n".join(t for t in pages if t), len(pdf.pages), ""
+        except Exception as e:
+            return "", 0, str(e)
+
+    @staticmethod
+    def _alpha_char_count(text: str) -> int:
+        return sum(1 for c in text if c.isalpha())
+    def _extract_with_pypdf2(self, path: Path) -> tuple[str, int, str]:
+        """Returns (text, page_count, error_message)."""
         try:
             reader = PdfReader(str(path))
             pages = []
-            
             for page in reader.pages:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-            
-            full_text = "\n\n".join(pages)
-            
-            # Estimate confidence based on text quality
-            confidence = self._estimate_extraction_confidence(full_text)
-            
-            return ParseResult(
-                text=full_text,
-                file_type="pdf",
-                page_count=len(reader.pages),
-                success=True,
-                confidence=confidence
-            )
+            return "\n\n".join(pages), len(reader.pages), ""
         except Exception as e:
-            return ParseResult(
-                text="",
-                file_type="pdf",
-                success=False,
-                error_message=f"PDF parsing error: {str(e)}",
-                confidence=0.0
-            )
-    
+            return "", 0, str(e)
+
+    def _extract_with_pdfplumber(self, path: Path) -> tuple[str, int, str]:
+        """Returns (text, page_count, error_message)."""
+        try:
+            pages = []
+            with pdfplumber.open(str(path)) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        pages.append(text)
+                page_count = len(pdf.pages)
+            return "\n\n".join(pages), page_count, ""
+        except Exception as e:
+            return "", 0, str(e)
+
+    @staticmethod
+    def _alpha_char_count(text: str) -> int:
+        """Count of alphabetic characters only -- used instead of
+        len(text) so whitespace-only or punctuation-only 'extraction'
+        from a scanned PDF isn't mistaken for real content."""
+        return sum(1 for c in text if c.isalpha())
     def _parse_docx(self, path: Path) -> ParseResult:
         """Parse a DOCX file."""
         if not DOCX_AVAILABLE:
