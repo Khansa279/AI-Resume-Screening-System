@@ -15,8 +15,9 @@ from src.models import (
     ResumeData,
     Skill,
     SkillsMatchResult,
+    WorkExperience,
 )
-from src.skills_taxonomy import canonical_skill_key, extract_canonical_skills
+from src.skill_taxonomy import canonical_skill_key, extract_canonical_skills
 
 
 SAMPLE_RESUME = Path("sample_data/resumes/senior_python_dev.txt")
@@ -124,6 +125,123 @@ def test_experience_and_matcher_stable():
     e2 = evaluate_experience(data, reqs)
     assert e1.model_dump() == e2.model_dump()
     assert e1.years_relevant > 0
+
+
+# ---------------------------------------------------------------------------
+# Batch 2: deterministic experience evaluation -- date-handling edge cases.
+# evaluate_experience() must never call an LLM and must give byte-identical
+# ExperienceEvaluation output for identical input, no matter how messy the
+# resume's dates/durations are.
+# ---------------------------------------------------------------------------
+
+def test_experience_no_dates_or_duration_is_deterministic():
+    """A role with no start/end date and no duration text at all must not
+    crash, and must fall back to the same small default every time."""
+    exp = WorkExperience(title="Software Engineer", company="Acme Corp")
+    data = ResumeData(work_experience=[exp])
+    reqs = JobRequirements(title="Software Engineer", min_years_experience=2)
+
+    e1 = evaluate_experience(data, reqs)
+    e2 = evaluate_experience(data, reqs)
+    assert e1.model_dump() == e2.model_dump()
+    assert e1.years_relevant >= 0.0
+
+
+def test_experience_unparseable_dates_degrade_gracefully():
+    """Garbage date strings (not a real date, no year, no month) must not
+    raise, and must resolve to the same deterministic fallback every time."""
+    exp = WorkExperience(
+        title="Data Analyst", company="Beta LLC",
+        start_date="whenever", end_date="who knows", duration="",
+    )
+    data = ResumeData(work_experience=[exp])
+    reqs = JobRequirements(title="Data Analyst", min_years_experience=1)
+
+    e1 = evaluate_experience(data, reqs)
+    e2 = evaluate_experience(data, reqs)
+    assert e1.model_dump() == e2.model_dump()
+
+
+def test_experience_duration_text_only_is_deterministic():
+    """No start/end dates, only a free-text duration -- must be parsed from
+    the duration string, and identically so on repeated evaluation."""
+    exp = WorkExperience(
+        title="Backend Engineer", company="Gamma Inc",
+        duration="2 years 3 months",
+    )
+    data = ResumeData(work_experience=[exp])
+    reqs = JobRequirements(title="Backend Engineer", min_years_experience=2)
+
+    e1 = evaluate_experience(data, reqs)
+    e2 = evaluate_experience(data, reqs)
+    assert e1.model_dump() == e2.model_dump()
+    assert e1.years_relevant > 0
+
+
+def test_experience_partial_date_range_is_deterministic():
+    """Only a start date (role presumed ongoing, end date missing/blank) --
+    must still produce a stable result across repeated calls in the same run."""
+    exp = WorkExperience(title="Product Manager", company="Delta Co", start_date="2021")
+    data = ResumeData(work_experience=[exp])
+    reqs = JobRequirements(title="Product Manager", min_years_experience=1)
+
+    e1 = evaluate_experience(data, reqs)
+    e2 = evaluate_experience(data, reqs)
+    assert e1.model_dump() == e2.model_dump()
+    assert e1.years_relevant > 0
+
+
+def test_experience_multiple_roles_mixed_relevance_is_deterministic():
+    """Several roles of very different relevance -- the whole evaluation
+    (years_relevant, role_relevance, experience_score, gaps, strengths)
+    must be byte-identical across repeated calls on the same input."""
+    exps = [
+        WorkExperience(
+            title="Senior Backend Engineer", company="TechCorp",
+            start_date="2022-01", end_date="Present",
+            responsibilities=["Built REST APIs with Django and PostgreSQL"],
+            technologies=["Python", "Django", "PostgreSQL"],
+        ),
+        WorkExperience(
+            title="Barista", company="Coffee Shop",
+            start_date="2018-01", end_date="2019-01",
+            responsibilities=["Made coffee", "Handled the cash register"],
+            technologies=[],
+        ),
+    ]
+    data = ResumeData(work_experience=exps)
+    reqs = JobRequirements(
+        title="Backend Software Engineer",
+        required_skills=["Python", "Django", "PostgreSQL"],
+        min_years_experience=2,
+    )
+
+    e1 = evaluate_experience(data, reqs)
+    e2 = evaluate_experience(data, reqs)
+    assert e1.model_dump() == e2.model_dump()
+    # The relevant senior role should clearly outweigh the unrelated one.
+    assert e1.role_relevance > 0.3
+
+
+def test_experience_evaluator_agent_makes_no_llm_call():
+    """End-to-end guard: ExperienceEvaluatorAgent.process() must never touch
+    self.llm. We assert this by simply never providing an API key/LLM and
+    confirming the call still succeeds (BaseAgent.llm is lazy -- if the
+    agent tried to use it, this would raise trying to build a real client)."""
+    from src.agents.experience_eval import ExperienceEvaluatorAgent
+
+    text = SAMPLE_RESUME.read_text(encoding="utf-8")
+    data = parse_resume_text(text)
+    reqs = JobRequirements(title="Backend Software Engineer", min_years_experience=2)
+    agent = ExperienceEvaluatorAgent()
+    assert agent._llm is None  # never lazily created
+
+    async def run():
+        return await agent.process({"resume_data": data, "job_requirements": reqs})
+
+    result = asyncio.run(run())
+    assert isinstance(result["experience_eval"], ExperienceEvaluation)
+    assert agent._llm is None  # still never created -- no LLM call was made
 
 
 def test_final_score_formula_unchanged():

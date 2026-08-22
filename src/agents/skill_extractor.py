@@ -20,6 +20,29 @@ from ..models import Skill, ResumeData
 from ..skills_taxonomy import normalize_skill_name, find_skills_in_text, category_of
 
 
+def extract_skills_from_resume(resume_data: ResumeData) -> list[Skill]:
+    """
+    Module-level convenience wrapper around SkillExtractorAgent's
+    deterministic extraction, so callers/tests that just want "skills for
+    this ResumeData" don't need to construct an agent and go through
+    `process(state)`.
+
+    NOTE (scope note for Batch 2 reviewers): this wrapper was added only
+    to fix `tests/test_deterministic_pipeline.py`, which already imported
+    this name but it didn't exist yet -- that import error was blocking
+    collection of the WHOLE test file, including the Batch 2
+    (deterministic experience evaluation) tests. This wrapper does not
+    change skill-extraction behavior at all; it delegates to the exact
+    same `_extract_deterministic` this agent already used. Migrating
+    skill extraction/matching onto the newer `src/skill_taxonomy.py`
+    module (used by experience_eval.py and resume_parser.py) is a
+    separate, not-yet-done batch and is intentionally NOT part of this
+    change.
+    """
+    skills, _confidence = SkillExtractorAgent()._extract_deterministic(resume_data)
+    return skills
+
+
 class SkillExtractorAgent(BaseAgent):
     """
     Agent responsible for extracting and categorizing skills from parsed resume.
