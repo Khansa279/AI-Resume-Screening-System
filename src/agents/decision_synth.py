@@ -208,16 +208,30 @@ class DecisionSynthesizerAgent(BaseAgent):
                     f"{skills_match.preferred_skills_total} preferred skills"
                 )
             skill_clause += "."
-            missing = [m.requirement for m in skills_match.matches if not m.matched]
-            required_missing = []
-            if job_requirements:
+            missing_matches = [m for m in skills_match.matches if not m.matched]
+            if job_requirements and job_requirements.required_skills:
+                # required_skills is the one authoritative list that tells us
+                # which unmatched requirement strings are REQUIRED vs
+                # PREFERRED. Filter against it -- do not fall back to "every
+                # unmatched requirement" when this comes up empty, since an
+                # empty result here can legitimately mean "no required skills
+                # are missing" (only preferred ones are), and dumping every
+                # unmatched match in that case would mislabel a missing
+                # preferred skill as "required" in the sentence below (this
+                # was the exact bug: see
+                # test_decision_reasoning_never_mislabels_preferred_as_required).
                 required_set = {s.casefold() for s in job_requirements.required_skills}
-                required_missing = [m for m in missing if m.casefold() in required_set]
-            if not required_missing:
                 required_missing = [
-                    m.requirement for m in skills_match.matches
-                    if not m.matched and m.requirement
-                ][:5]
+                    m.requirement for m in missing_matches
+                    if m.requirement.casefold() in required_set
+                ]
+            else:
+                # No job_requirements available to disambiguate required vs
+                # preferred -- the numeric "X of Y required skills" clause
+                # above is still accurate (it comes straight from
+                # skills_match), we just can't safely name which ones without
+                # guessing, so we don't.
+                required_missing = []
             if skills_match.required_skills_met < skills_match.required_skills_total and required_missing:
                 skill_clause += " Missing required skills: " + ", ".join(required_missing[:6]) + "."
 
