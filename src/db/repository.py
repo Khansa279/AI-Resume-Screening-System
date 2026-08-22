@@ -239,6 +239,7 @@ def create_resume(
     file_path: str = "",
     file_type: str = "unknown",
     raw_text: str = "",
+    content_hash: str = "",
     summary: str = "",
     skills_section: list[str] | None = None,
     certifications: list[str] | None = None,
@@ -263,6 +264,7 @@ def create_resume(
         file_path=file_path,
         file_type=file_type,
         raw_text=raw_text,
+        content_hash=content_hash or None,
         summary=summary,
         skills_section=skills_section or [],
         certifications=certifications or [],
@@ -293,6 +295,27 @@ def get_resume(db: Session, resume_id: int) -> Optional[models.Resume]:
     return db.get(models.Resume, resume_id)
 
 
+def get_resume_by_content_hash(
+    db: Session, content_hash: str
+) -> Optional[models.Resume]:
+    """Return the earliest resume with this hash (stable reuse). Existing
+    development duplicates are ignored after the first row."""
+    if not content_hash:
+        return None
+    stmt = (
+        select(models.Resume)
+        .where(models.Resume.content_hash == content_hash)
+        .options(
+            selectinload(models.Resume.education),
+            selectinload(models.Resume.work_experience),
+            selectinload(models.Resume.skills),
+            selectinload(models.Resume.candidate),
+        )
+        .order_by(models.Resume.id.asc())
+    )
+    return db.scalars(stmt).first()
+
+
 # ============================================================================
 # Screening / Evaluation
 # ============================================================================
@@ -308,6 +331,25 @@ def create_screening(
     db.add(screening)
     db.flush()
     return screening
+
+
+def get_screening_by_resume_and_jd(
+    db: Session, resume_id: int, job_description_id: int
+) -> Optional[models.Screening]:
+    stmt = (
+        select(models.Screening)
+        .where(models.Screening.resume_id == resume_id)
+        .where(models.Screening.job_description_id == job_description_id)
+        .options(
+            selectinload(models.Screening.result),
+            selectinload(models.Screening.explanation),
+            selectinload(models.Screening.skill_match_result),
+            selectinload(models.Screening.experience_evaluation),
+            selectinload(models.Screening.resume).selectinload(models.Resume.candidate),
+        )
+        .order_by(models.Screening.id.asc())
+    )
+    return db.scalars(stmt).first()
 
 
 def mark_screening_started(db: Session, screening_id: int) -> None:

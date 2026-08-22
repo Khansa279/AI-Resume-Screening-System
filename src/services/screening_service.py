@@ -13,6 +13,14 @@ Design decisions worth knowing before you extend this:
 - Job requirements are parsed ONCE per JobDescription version and reused
   for every candidate (see ensure_job_requirements). Without this, ranking
   50 resumes would re-run JobAnalyzerAgent 50 times against identical text.
+  IMPORTANT: this caching only helps if callers actually reuse the same
+  position_id/job_description_id across runs -- a caller that creates a
+  brand-new Position + JobDescription every time it's invoked (e.g. a
+  test/demo script generating a unique org name per run) will defeat this
+  cache entirely and get a freshly re-extracted (and therefore slightly
+  different, LLM-sampled) set of required_skills/min_years_experience on
+  every run, which shows up downstream as much larger match_score swings
+  than pure LLM judgment noise alone would produce.
 - We call workflow.run_full(), not workflow.run(), because we need
   skills_match/experience_eval to persist SkillMatchResult/
   ExperienceEvaluation and to build the Explanation -- run() throws that
@@ -27,16 +35,24 @@ from __future__ import annotations
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
 
 from ..db import get_session, repository as repo
 from ..db import models as db_models
-from ..document_parser import parse_document
-from ..models import JobRequirements as JobRequirementsModel
+from ..document_parser import parse_document, resume_content_hash
+from ..models import (
+    JobRequirements as JobRequirementsModel,
+    ResumeData,
+    ContactInfo,
+    Education,
+    WorkExperience,
+    Skill,
+)
 from ..workflow import create_screening_workflow
 from ..agents.job_analyzer import JobAnalyzerAgent
+from ..agents.skill_extractor import extract_skills_from_resume
 
 
 # Where uploaded resumes get copied to, separate from the DB file itself.
@@ -53,7 +69,18 @@ async def ensure_job_requirements(
     """Return persisted JobRequirements for this JD version. Runs
     JobAnalyzerAgent only if they don't already exist -- this is what
     makes batch screening cheap: one LLM call per JD version, not one
-    per resume."""
+    per resume.
+
+    NOTE: this cache is keyed on job_description_id. If a caller creates
+    a new JobDescription (and therefore a new id) every time it runs --
+    even for what is conceptually "the same JD" -- this will silently
+    miss every time and re-run JobAnalyzerAgent, producing a freshly
+    LLM-sampled (and possibly different) set of requirements on each
+    run. Callers that want stable, repeatable scoring across runs must
+    reuse the same position/job_description_id (see
+    src/db/repository.py::get_position_by_title and
+    get_current_job_description) rather than creating a new one per
+    invocation."""
     existing = repo.get_job_requirements(db, job_description_id)
     if existing is not None:
         return existing
@@ -107,6 +134,50 @@ def _job_requirements_to_dict(jr: db_models.JobRequirements) -> dict:
     }
 
 
+def _resume_row_to_data(row: db_models.Resume) -> ResumeData:
+    """Rebuild in-memory ResumeData from a persisted resume."""
+    candidate = row.candidate
+    return ResumeData(
+        contact=ContactInfo(
+            name=candidate.name if candidate else "",
+            email=(candidate.email or "") if candidate else "",
+            phone=candidate.phone if candidate else "",
+            location=candidate.location if candidate else "",
+            linkedin=candidate.linkedin if candidate else "",
+            github=candidate.github if candidate else "",
+        ),
+        summary=row.summary or "",
+        education=[
+            Education(
+                degree=e.degree or "",
+                field=e.field or "",
+                institution=e.institution or "",
+                graduation_year=e.graduation_year or "",
+                gpa=e.gpa or "",
+            )
+            for e in (row.education or [])
+        ],
+        work_experience=[
+            WorkExperience(
+                title=w.title,
+                company=w.company,
+                duration=w.duration or "",
+                start_date=w.start_date or "",
+                end_date=w.end_date or "",
+                responsibilities=w.responsibilities or [],
+                technologies=w.technologies or [],
+            )
+            for w in (row.work_experience or [])
+        ],
+        skills_section=row.skills_section or [],
+        certifications=row.certifications or [],
+        projects=row.projects or [],
+        raw_text=row.raw_text or "",
+        parsing_confidence=row.parsing_confidence or 0.0,
+        parsing_notes=row.parsing_notes or [],
+    )
+
+
 # ============================================================================
 # Resume file storage
 # ============================================================================
@@ -128,15 +199,48 @@ def _store_resume_file(source_path: str, position_id: int) -> str:
 # no extra LLM call needed
 # ============================================================================
 
+def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
+    """
+    De-duplicate a list of skill/requirement strings for display.
+
+    WHY THIS EXISTS: SkillsMatcherAgent returns one SkillMatch entry per
+    JD requirement, not per distinct candidate skill. Two separate
+    requirements (e.g. "Data Structures" and "Algorithms") can both
+    legitimately resolve to the same matched_skill (e.g. "Data
+    Structures & Algorithms") if that's how the candidate listed it --
+    that's correct matching behavior and the underlying SkillMatch rows
+    are deliberately kept as-is (they preserve which specific
+    requirement was satisfied, which matters for the audit trail /
+    skill_match_results table). This function only dedupes the
+    human-facing summary list built here in the Explanation, treating
+    differences in case or surrounding whitespace as the same skill
+    while preserving first-seen casing and ordering.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
 def _build_explanation(skills_match, experience_eval, final_output) -> dict:
-    matching_skills = [
+    matching_skills = _dedupe_preserve_order(
         m.matched_skill for m in skills_match.matches
         if m.matched and m.matched_skill
-    ]
-    skill_gaps = [
+    )
+    skill_gaps = _dedupe_preserve_order(
         m.requirement for m in skills_match.matches
         if not m.matched
-    ]
+    )
 
     confidence_label = (
         "High" if final_output.confidence >= 0.75
@@ -188,18 +292,37 @@ async def screen_candidate(
     jr_row = await ensure_job_requirements(db, jd.id)
     job_requirements_dict = _job_requirements_to_dict(jr_row)
 
-    # Parse the document ONCE here; pass raw text into the workflow so its
-    # own _parse_document_node has nothing to do (resume_path left empty).
     parsed_doc = parse_document(resume_file_path)
     if not parsed_doc.success:
         raise ValueError(f"Could not parse resume: {parsed_doc.error_message}")
 
+    text_hash = resume_content_hash(parsed_doc.text)
+    existing_resume = repo.get_resume_by_content_hash(db, text_hash)
+
+    if existing_resume is not None:
+        prior = repo.get_screening_by_resume_and_jd(db, existing_resume.id, jd.id)
+        if prior is not None and prior.status == "completed" and prior.result is not None:
+            return prior
+
     workflow = create_screening_workflow()
-    final_state = await workflow.run_full(
-        resume_text=parsed_doc.text,
-        job_description=jd.raw_text,
-        job_requirements=job_requirements_dict,
-    )
+    if existing_resume is not None:
+        resume_data_cached = _resume_row_to_data(existing_resume)
+        if not resume_data_cached.raw_text:
+            resume_data_cached.raw_text = parsed_doc.text
+        extracted = extract_skills_from_resume(resume_data_cached)
+        final_state = await workflow.run_full(
+            resume_text=resume_data_cached.raw_text,
+            job_description=jd.raw_text,
+            job_requirements=job_requirements_dict,
+            resume_data=resume_data_cached.model_dump(),
+            extracted_skills=[s.model_dump() for s in extracted],
+        )
+    else:
+        final_state = await workflow.run_full(
+            resume_text=parsed_doc.text,
+            job_description=jd.raw_text,
+            job_requirements=job_requirements_dict,
+        )
 
     resume_data = final_state.get("resume_data")
     skills_match = final_state.get("skills_match")
@@ -223,46 +346,62 @@ async def screen_candidate(
     if isinstance(final_output, dict):
         final_output = ScreeningOutput.model_validate(final_output)
 
-    # ---- Candidate + Resume -------------------------------------------
-    contact = resume_data.contact if resume_data else None
-    candidate = repo.get_or_create_candidate(
-        db,
-        name=contact.name if contact else "",
-        email=contact.email if contact else "",
-        phone=contact.phone if contact else "",
-        location=contact.location if contact else "",
-        linkedin=contact.linkedin if contact else "",
-        github=contact.github if contact else "",
-    )
+    if existing_resume is not None:
+        resume_row = existing_resume
+    else:
+        contact = resume_data.contact if resume_data else None
+        candidate = repo.get_or_create_candidate(
+            db,
+            name=contact.name if contact else "",
+            email=contact.email if contact else "",
+            phone=contact.phone if contact else "",
+            location=contact.location if contact else "",
+            linkedin=contact.linkedin if contact else "",
+            github=contact.github if contact else "",
+        )
 
-    stored_path = _store_resume_file(resume_file_path, position_id)
+        stored_path = _store_resume_file(resume_file_path, position_id)
 
-    resume_row = repo.create_resume(
-        db,
-        candidate_id=candidate.id,
-        position_id=position_id,
-        file_path=stored_path,
-        file_type=parsed_doc.file_type,
-        raw_text=resume_data.raw_text if resume_data else parsed_doc.text,
-        summary=resume_data.summary if resume_data else "",
-        skills_section=resume_data.skills_section if resume_data else [],
-        certifications=resume_data.certifications if resume_data else [],
-        projects=resume_data.projects if resume_data else [],
-        parsing_confidence=resume_data.parsing_confidence if resume_data else 0.0,
-        parsing_notes=resume_data.parsing_notes if resume_data else [],
-        education=[e.model_dump() for e in resume_data.education] if resume_data else [],
-        work_experience=[w.model_dump() for w in resume_data.work_experience] if resume_data else [],
-        skills=[
-            {
-                "name": s.name, "category": s.category, "proficiency": s.proficiency,
-                "confidence": s.confidence, "source": s.source,
-            }
-            for s in (final_state.get("extracted_skills") or [])
-        ],
-    )
+        resume_row = repo.create_resume(
+            db,
+            candidate_id=candidate.id,
+            position_id=position_id,
+            file_path=stored_path,
+            file_type=parsed_doc.file_type,
+            raw_text=resume_data.raw_text if resume_data else parsed_doc.text,
+            content_hash=text_hash,
+            summary=resume_data.summary if resume_data else "",
+            skills_section=resume_data.skills_section if resume_data else [],
+            certifications=resume_data.certifications if resume_data else [],
+            projects=resume_data.projects if resume_data else [],
+            parsing_confidence=resume_data.parsing_confidence if resume_data else 0.0,
+            parsing_notes=resume_data.parsing_notes if resume_data else [],
+            education=[e.model_dump() for e in resume_data.education] if resume_data else [],
+            work_experience=[w.model_dump() for w in resume_data.work_experience] if resume_data else [],
+            skills=[
+                (
+                    {
+                        "name": s.get("name", ""),
+                        "category": s.get("category", "other"),
+                        "proficiency": s.get("proficiency", "intermediate"),
+                        "confidence": s.get("confidence", 0.8),
+                        "source": s.get("source", "explicit"),
+                    }
+                    if isinstance(s, dict)
+                    else {
+                        "name": s.name, "category": s.category, "proficiency": s.proficiency,
+                        "confidence": s.confidence, "source": s.source,
+                    }
+                )
+                for s in (final_state.get("extracted_skills") or [])
+            ],
+        )
 
-    # ---- Screening + results -------------------------------------------
-    screening = repo.create_screening(db, resume_row.id, jd.id)
+    screening = repo.get_screening_by_resume_and_jd(db, resume_row.id, jd.id)
+    if screening is not None and screening.result is not None:
+        return screening
+    if screening is None:
+        screening = repo.create_screening(db, resume_row.id, jd.id)
     repo.mark_screening_started(db, screening.id)
 
     if skills_match:

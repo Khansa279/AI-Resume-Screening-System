@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from rich import prompt
+
 from .base import BaseAgent
 from ..models import JobRequirements, Requirement
 
@@ -19,6 +21,7 @@ class JobAnalyzerAgent(BaseAgent):
     
     name = "JobAnalyzerAgent"
     description = "Parse job descriptions into structured requirements (required skills, experience, education)"
+    temperature = 0.0
     
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -43,7 +46,7 @@ class JobAnalyzerAgent(BaseAgent):
         prompt = self._build_analysis_prompt(job_description)
         
         # Call LLM
-        response = await self._call_llm_async(prompt)
+        response = await self._call_llm_for_json_async(prompt)   # was: self._call_llm_async(prompt)
         
         # Parse the response
         job_requirements = self._parse_response(response)

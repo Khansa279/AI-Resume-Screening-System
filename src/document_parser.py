@@ -1,5 +1,6 @@
 """Document parser for extracting text from PDF and DOCX files."""
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,32 @@ except ImportError:
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _PRIVATE_USE_PATTERN = re.compile(r"[\uE000-\uF8FF]")
 _ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
+def normalize_extracted_text(text: str) -> str:
+    """Collapse trivial whitespace so the same resume is hashed the same way
+    even if PDF extractors differ on trailing spaces or extra blank lines."""
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    collapsed: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if not line:
+            blank_run += 1
+            if blank_run == 1:
+                collapsed.append("")
+        else:
+            blank_run = 0
+            collapsed.append(line)
+    return "\n".join(collapsed).strip()
+
+
+def resume_content_hash(text: str) -> str:
+    """SHA-256 of whitespace-normalized extracted resume text."""
+    normalized = normalize_extracted_text(text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 @dataclass
 class ParseResult:

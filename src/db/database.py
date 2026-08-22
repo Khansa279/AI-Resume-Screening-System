@@ -11,10 +11,10 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from .models import Base
+from .models import Base, Resume
 
 # Default to a local SQLite file at the project root. Override with
 # DATABASE_URL in .env if you ever need to point elsewhere (e.g. a
@@ -37,12 +37,57 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expi
 def init_db() -> None:
     """Create all tables if they don't already exist.
 
-    Safe to call multiple times -- SQLAlchemy only creates what's missing.
-    This does NOT handle schema migrations (e.g. adding a column to an
-    existing table); that's an Alembic concern for later, not something
-    we're solving in this phase.
+    Also applies the one additive schema change this redesign needs
+    (resumes.content_hash) on databases created before that column existed,
+    and backfills hashes for existing rows. Does not delete duplicate
+    development records.
     """
     Base.metadata.create_all(bind=engine)
+    _ensure_resume_content_hash_column()
+    _backfill_resume_content_hashes()
+
+
+def _ensure_resume_content_hash_column() -> None:
+    """SQLite create_all will not ADD a column to an existing table."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        rows = conn.execute(text("PRAGMA table_info(resumes)")).fetchall()
+        col_names = {row[1] for row in rows}
+        if "content_hash" not in col_names:
+            conn.execute(text("ALTER TABLE resumes ADD COLUMN content_hash VARCHAR"))
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_resumes_content_hash ON resumes (content_hash)")
+        )
+
+
+def _backfill_resume_content_hashes() -> None:
+    """Fill content_hash for existing Resume rows that have raw_text."""
+    from sqlalchemy import or_, select
+
+    from ..document_parser import resume_content_hash
+
+    db = SessionLocal()
+    try:
+        rows = list(
+            db.scalars(
+                select(Resume).where(
+                    or_(Resume.content_hash.is_(None), Resume.content_hash == "")
+                )
+            )
+        )
+        updated = False
+        for row in rows:
+            if row.raw_text:
+                row.content_hash = resume_content_hash(row.raw_text)
+                updated = True
+        if updated:
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @contextmanager

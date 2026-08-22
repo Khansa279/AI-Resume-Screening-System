@@ -155,6 +155,8 @@ class ResumeScreeningWorkflow:
     
     async def _parse_resume_node(self, state: WorkflowState) -> dict:
         """Node: Parse resume text into structured data."""
+        if state.get("resume_data"):
+            return {}
         return await self.resume_parser.process(dict(state))
     
     async def _analyze_job_node(self, state: WorkflowState) -> dict:
@@ -167,6 +169,8 @@ class ResumeScreeningWorkflow:
     
     async def _extract_skills_node(self, state: WorkflowState) -> dict:
         """Node: Extract skills from parsed resume."""
+        if state.get("extracted_skills"):
+            return {}
         return await self.skill_extractor.process(dict(state))
     
     async def _match_skills_node(self, state: WorkflowState) -> dict:
@@ -181,99 +185,28 @@ class ResumeScreeningWorkflow:
         """Node: Synthesize final decision."""
         return await self.decision_synthesizer.process(dict(state))
     
-    async def run(
-        self,
-        resume_path: str = "",
-        resume_text: str = "",
-        job_description: str = ""
-    ) -> ScreeningOutput:
-        """
-        Run the complete screening workflow.
-        
-        Args:
-            resume_path: Path to resume file (PDF, DOCX, or TXT)
-            resume_text: Raw resume text (alternative to file path)
-            job_description: The job description text
-            
-        Returns:
-            ScreeningOutput with match score, recommendation, and reasoning
-        """
-        # Initialize state
-        initial_state: WorkflowState = {
-            "resume_path": resume_path,
-            "resume_raw_text": resume_text,
-            "job_description": job_description,
-            "resume_data": None,
-            "extracted_skills": [],
-            "job_requirements": None,
-            "skills_match": None,
-            "experience_eval": None,
-            "final_output": None,
-            "errors": [],
-            "agent_confidences": {},
-            "workflow_complete": False,
-        }
-        
-        # Run the workflow
-        final_state = await self.graph.ainvoke(initial_state)
-        
-        # Extract and return the final output
-        output_data = final_state.get("final_output")
-        
-        if output_data:
-            if isinstance(output_data, dict):
-                return ScreeningOutput.model_validate(output_data)
-            return output_data
-        
-        # Fallback if no output
-        return ScreeningOutput(
-            match_score=0.0,
-            recommendation="Error - workflow did not complete",
-            requires_human=True,
-            confidence=0.0,
-            reasoning_summary="The workflow failed to produce a result. Please review manually.",
-            flags=["Workflow error"]
-        )
-    
     async def run_full(
         self,
         resume_path: str = "",
         resume_text: str = "",
         job_description: str = "",
         job_requirements: dict | None = None,
+        resume_data: dict | None = None,
+        extracted_skills: list | None = None,
     ) -> WorkflowState:
         """
         Run the complete screening workflow and return the FULL final
         state (not just the synthesized output).
 
-        This exists because a caller that wants to persist results
-        (SkillMatchResult, ExperienceEvaluation, an Explanation built from
-        the match/eval detail) needs more than ScreeningOutput alone --
-        run() below only ever returned final_output and threw the rest
-        away. Any code doing DB persistence should call this instead of
-        run().
-
-        Args:
-            resume_path: Path to resume file (PDF, DOCX, or TXT)
-            resume_text: Raw resume text (alternative to file path)
-            job_description: The job description text
-            job_requirements: Optional pre-parsed requirements dict. Pass
-                this when screening many candidates against the same
-                position so JobAnalyzerAgent only runs once per JD
-                version instead of once per resume.
-
-        Returns:
-            The full WorkflowState dict after the graph finishes --
-            includes resume_data, extracted_skills, job_requirements,
-            skills_match, experience_eval, final_output, errors, etc.
+        Pre-filled resume_data / extracted_skills / job_requirements skip
+        the corresponding nodes (same pattern as cached JobRequirements).
         """
-        
         initial_state: WorkflowState = {
             "resume_path": resume_path,
             "resume_raw_text": resume_text,
             "job_description": job_description,
-            "resume_data": None,
-            "extracted_skills": [],
+            "resume_data": resume_data,
+            "extracted_skills": extracted_skills or [],
             "job_requirements": job_requirements,
             "skills_match": None,
             "experience_eval": None,
@@ -286,46 +219,38 @@ class ResumeScreeningWorkflow:
         return await self.graph.ainvoke(initial_state)
 
     async def run(
-            self,
-            resume_path: str = "",
-            resume_text: str = "",
-            job_description: str = "",
-            job_requirements: dict | None = None,
-        ) -> ScreeningOutput:
-            """
-            Run the complete screening workflow.
+        self,
+        resume_path: str = "",
+        resume_text: str = "",
+        job_description: str = "",
+        job_requirements: dict | None = None,
+        resume_data: dict | None = None,
+        extracted_skills: list | None = None,
+    ) -> ScreeningOutput:
+        """Run the workflow and return only ScreeningOutput."""
+        final_state = await self.run_full(
+            resume_path=resume_path,
+            resume_text=resume_text,
+            job_description=job_description,
+            job_requirements=job_requirements,
+            resume_data=resume_data,
+            extracted_skills=extracted_skills,
+        )
 
-            Args:
-                resume_path: Path to resume file (PDF, DOCX, or TXT)
-                resume_text: Raw resume text (alternative to file path)
-                job_description: The job description text
-                job_requirements: Optional pre-parsed requirements dict (see
-                    run_full for why you'd pass this)
+        output_data = final_state.get("final_output")
 
-            Returns:
-                ScreeningOutput with match score, recommendation, and reasoning
-            """
-            final_state = await self.run_full(
-                resume_path=resume_path,
-                resume_text=resume_text,
-                job_description=job_description,
-                job_requirements=job_requirements,
-            )
+        if output_data:
+            if isinstance(output_data, dict):
+                return ScreeningOutput.model_validate(output_data)
+            return output_data
 
-            output_data = final_state.get("final_output")
-
-            if output_data:
-                if isinstance(output_data, dict):
-                    return ScreeningOutput.model_validate(output_data)
-                return output_data
-
-            return ScreeningOutput(
-                match_score=0.0,
-                recommendation="Error - workflow did not complete",
-                requires_human=True,
-                confidence=0.0,
-                reasoning_summary="The workflow failed to produce a result. Please review manually.",
-                flags=["Workflow error"]
+        return ScreeningOutput(
+            match_score=0.0,
+            recommendation="Error - workflow did not complete",
+            requires_human=True,
+            confidence=0.0,
+            reasoning_summary="The workflow failed to produce a result. Please review manually.",
+            flags=["Workflow error"]
         )
         
     def run_sync(

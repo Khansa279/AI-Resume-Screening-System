@@ -234,6 +234,10 @@ class Resume(Base):
     file_path = Column(String, nullable=True)
     file_type = Column(String, default="unknown")  # pdf | docx | txt | unknown
     raw_text = Column(Text, default="")
+    # SHA-256 of whitespace-normalized extracted text. Indexed (not unique)
+    # so existing development duplicates can be backfilled; application
+    # logic reuses the earliest matching row instead of inserting another.
+    content_hash = Column(String, nullable=True, index=True)
     summary = Column(Text, default="")
     skills_section = Column(JSON, default=list)  # list[str], as explicitly listed on resume
     certifications = Column(JSON, default=list)  # list[str]

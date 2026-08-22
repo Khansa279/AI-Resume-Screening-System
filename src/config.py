@@ -26,7 +26,7 @@ class Config:
     
     # Common settings
     temperature: float = 0.3
-    max_tokens: int = 4096
+    max_tokens: int = 8192 
     
     # Confidence Thresholds
     confidence_threshold_low: float = 0.6

@@ -1,5 +1,6 @@
 """Decision Synthesizer Agent - Combines all inputs into final recommendation."""
 
+import re
 from typing import Any
 
 from .base import BaseAgent
@@ -10,7 +11,7 @@ from ..models import (
     ResumeData,
     JobRequirements
 )
-from ..config import get_config
+from ..config import get_config, Config
 
 
 class DecisionSynthesizerAgent(BaseAgent):
@@ -61,8 +62,11 @@ class DecisionSynthesizerAgent(BaseAgent):
         if errors or not skills_match or not experience_eval:
             return self._handle_error_case(state, errors)
         
-        # Get config for thresholds
-        config = get_config()
+        # Get config for thresholds (API keys are not required here)
+        try:
+            config = get_config()
+        except ValueError:
+            config = Config()
         
         # Calculate final scores
         match_score = self._calculate_match_score(skills_match, experience_eval)
@@ -73,13 +77,11 @@ class DecisionSynthesizerAgent(BaseAgent):
         recommendation = self._determine_recommendation(
             match_score, requires_human, config
         )
-        
-        # Generate reasoning
-        prompt = self._build_reasoning_prompt(
+
+        reasoning = self._build_reasoning_summary(
             resume_data, job_requirements, skills_match, experience_eval,
             match_score, recommendation, requires_human
         )
-        reasoning = await self._call_llm_async(prompt)
         
         # Build final output
         final_output = ScreeningOutput(
@@ -87,7 +89,7 @@ class DecisionSynthesizerAgent(BaseAgent):
             recommendation=recommendation,
             requires_human=requires_human,
             confidence=confidence,
-            reasoning_summary=self._clean_reasoning(reasoning),
+            reasoning_summary=reasoning,
             skills_analysis=skills_match.reasoning if skills_match else None,
             experience_analysis=experience_eval.reasoning if experience_eval else None,
             flags=self._generate_flags(skills_match, experience_eval, errors)
@@ -178,7 +180,7 @@ class DecisionSynthesizerAgent(BaseAgent):
         else:
             return "Reject - does not meet minimum requirements"
     
-    def _build_reasoning_prompt(
+    def _build_reasoning_summary(
         self,
         resume_data: ResumeData | None,
         job_requirements: JobRequirements | None,
@@ -188,60 +190,53 @@ class DecisionSynthesizerAgent(BaseAgent):
         recommendation: str,
         requires_human: bool
     ) -> str:
-        """Build prompt for generating reasoning summary."""
+        """Deterministic 2-3 sentence explanation from structured results."""
         candidate_name = resume_data.contact.name if resume_data and resume_data.contact else "The candidate"
+        if not candidate_name:
+            candidate_name = "The candidate"
         job_title = job_requirements.title if job_requirements else "the position"
-        
-        skills_summary = skills_match.reasoning if skills_match else "Skills analysis not available"
-        exp_summary = experience_eval.reasoning if experience_eval else "Experience analysis not available"
-        
-        strengths = experience_eval.strengths if experience_eval else []
-        gaps = experience_eval.gaps_identified if experience_eval else []
-        
-        return f"""Generate a concise, professional reasoning summary for a resume screening decision.
 
-CONTEXT:
-- Candidate: {candidate_name}
-- Position: {job_title}
-- Match Score: {match_score:.0%}
-- Recommendation: {recommendation}
-- Requires Human Review: {requires_human}
+        skill_clause = "Skills analysis was unavailable."
+        if skills_match:
+            skill_clause = (
+                f"They meet {skills_match.required_skills_met} of "
+                f"{skills_match.required_skills_total} required skills"
+            )
+            if skills_match.preferred_skills_total:
+                skill_clause += (
+                    f" and {skills_match.preferred_skills_met} of "
+                    f"{skills_match.preferred_skills_total} preferred skills"
+                )
+            skill_clause += "."
+            missing = [m.requirement for m in skills_match.matches if not m.matched]
+            required_missing = []
+            if job_requirements:
+                required_set = {s.casefold() for s in job_requirements.required_skills}
+                required_missing = [m for m in missing if m.casefold() in required_set]
+            if not required_missing:
+                required_missing = [
+                    m.requirement for m in skills_match.matches
+                    if not m.matched and m.requirement
+                ][:5]
+            if skills_match.required_skills_met < skills_match.required_skills_total and required_missing:
+                skill_clause += " Missing required skills: " + ", ".join(required_missing[:6]) + "."
 
-SKILLS ANALYSIS:
-{skills_summary}
+        exp_clause = "Experience analysis was unavailable."
+        if experience_eval:
+            exp_clause = (
+                f"Relevant experience is estimated at {experience_eval.years_relevant:.1f} years "
+                f"(required {experience_eval.years_required}) with "
+                f"{experience_eval.role_relevance:.0%} role relevance."
+            )
 
-EXPERIENCE ANALYSIS:
-{exp_summary}
+        review = " Human review is suggested because the score is in an ambiguous range or confidence is limited." if requires_human else ""
 
-STRENGTHS IDENTIFIED:
-{chr(10).join('- ' + s for s in strengths) if strengths else '- None specifically identified'}
-
-GAPS IDENTIFIED:
-{chr(10).join('- ' + g for g in gaps) if gaps else '- None specifically identified'}
-
-Write a 2-3 sentence summary that:
-1. States the key reason for the recommendation
-2. Mentions the most important strength or concern
-3. If requires_human is true, explains why human review is suggested
-
-Keep it professional, objective, and actionable. Do not include JSON or formatting, just plain text."""
-    
-    def _clean_reasoning(self, reasoning: str) -> str:
-        """Clean up the reasoning text."""
-        # Remove any JSON formatting if present
-        if "```" in reasoning:
-            # Extract text outside of code blocks
-            parts = reasoning.split("```")
-            reasoning = " ".join(parts[::2])  # Take every other part (outside code blocks)
-        
-        # Trim and clean
-        reasoning = reasoning.strip()
-        
-        # Limit length
-        if len(reasoning) > 500:
-            reasoning = reasoning[:497] + "..."
-        
-        return reasoning
+        summary = (
+            f"{candidate_name} scores {match_score:.0%} for {job_title}. "
+            f"Recommendation: {recommendation}. "
+            f"{skill_clause} {exp_clause}{review}"
+        )
+        return re.sub(r"\s+", " ", summary).strip()
     
     def _generate_flags(
         self,
