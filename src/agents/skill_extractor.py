@@ -9,15 +9,19 @@ per candidate.
 
 Now it scans resume_data (skills_section, work-experience responsibilities
 + technologies, projects, certifications) against the shared taxonomy in
-`src/skills_taxonomy.py` and returns a normalized, de-duplicated, sorted
-skill list. Same resume text -> same skills, every time, 0 LLM calls.
+`src/skill_taxonomy.py` -- the SAME module used by SkillsMatcherAgent and
+ExperienceEvaluatorAgent (Batch 3: previously this agent used a separate,
+overlapping `src/skills_taxonomy.py` module, which risked the two agents
+disagreeing on what a given alias normalizes to) -- and returns a
+normalized, de-duplicated, sorted skill list. Same resume text -> same
+skills, every time, 0 LLM calls.
 """
 
 from typing import Any
 
 from .base import BaseAgent
 from ..models import Skill, ResumeData
-from ..skills_taxonomy import normalize_skill_name, find_skills_in_text, category_of
+from ..skill_taxonomy import extract_canonical_skills, skill_category
 
 
 def extract_skills_from_resume(resume_data: ResumeData) -> list[Skill]:
@@ -26,18 +30,6 @@ def extract_skills_from_resume(resume_data: ResumeData) -> list[Skill]:
     deterministic extraction, so callers/tests that just want "skills for
     this ResumeData" don't need to construct an agent and go through
     `process(state)`.
-
-    NOTE (scope note for Batch 2 reviewers): this wrapper was added only
-    to fix `tests/test_deterministic_pipeline.py`, which already imported
-    this name but it didn't exist yet -- that import error was blocking
-    collection of the WHOLE test file, including the Batch 2
-    (deterministic experience evaluation) tests. This wrapper does not
-    change skill-extraction behavior at all; it delegates to the exact
-    same `_extract_deterministic` this agent already used. Migrating
-    skill extraction/matching onto the newer `src/skill_taxonomy.py`
-    module (used by experience_eval.py and resume_parser.py) is a
-    separate, not-yet-done batch and is intentionally NOT part of this
-    change.
     """
     skills, _confidence = SkillExtractorAgent()._extract_deterministic(resume_data)
     return skills
@@ -51,7 +43,7 @@ class SkillExtractorAgent(BaseAgent):
     - Identifies explicit skills (from the resume's own skills section)
     - Infers skills mentioned in work-experience technologies/responsibilities
       and in project descriptions
-    - Categorizes skills using the shared taxonomy
+    - Categorizes skills using the shared taxonomy (src/skill_taxonomy.py)
     - Deduplicates and sorts the result for a stable, deterministic output
     """
 
@@ -103,52 +95,57 @@ class SkillExtractorAgent(BaseAgent):
             if source == "explicit":
                 entry["source"] = "explicit"
 
+        def add_recognized_or_raw(piece: str, source: str) -> None:
+            """Scan `piece` for known taxonomy skills; if none are
+            recognized, fall back to keeping the raw text as an
+            "other"-category skill so nothing the candidate listed is
+            lost (same fallback behavior as before Batch 3)."""
+            piece = (piece or "").strip()
+            if not piece:
+                return
+            hits = extract_canonical_skills(piece)
+            if hits:
+                for canonical, _category in hits:
+                    add(canonical, source)
+            else:
+                add(piece, source)
+
         # 1. Explicit skills section -- exact/alias lookups
         for raw_skill in resume_data.skills_section or []:
             # A skills_section entry may itself be a comma-separated group
             # (e.g. "Languages: Python, JavaScript, SQL") -- split defensively.
             for piece in raw_skill.replace(":", ",").split(","):
-                piece = piece.strip()
-                if not piece:
-                    continue
-                match = normalize_skill_name(piece)
-                if match:
-                    add(match[0], "explicit")
-                else:
-                    # Not in taxonomy -- still keep it as an explicit
-                    # "other" skill so nothing the candidate listed is lost.
-                    add(piece, "explicit")
+                add_recognized_or_raw(piece, "explicit")
 
         # 2. Work experience: technologies (explicit) + responsibilities (inferred)
         for exp in resume_data.work_experience or []:
             for tech in exp.technologies or []:
-                match = normalize_skill_name(tech.strip())
-                add(match[0] if match else tech.strip(), "explicit")
+                add_recognized_or_raw(tech, "explicit")
             for resp in exp.responsibilities or []:
-                for canonical in find_skills_in_text(resp):
+                for canonical, _category in extract_canonical_skills(resp):
                     add(canonical, "inferred")
             # Title itself can carry a signal, e.g. "Data Engineer"
-            for canonical in find_skills_in_text(exp.title or ""):
+            for canonical, _category in extract_canonical_skills(exp.title or ""):
                 add(canonical, "inferred")
 
         # 3. Projects (inferred)
         for project in resume_data.projects or []:
-            for canonical in find_skills_in_text(project):
+            for canonical, _category in extract_canonical_skills(project):
                 add(canonical, "inferred")
 
         # 4. Summary (inferred, light signal)
         if resume_data.summary:
-            for canonical in find_skills_in_text(resume_data.summary):
+            for canonical, _category in extract_canonical_skills(resume_data.summary):
                 add(canonical, "inferred")
 
         # 5. Certifications imply the certified skill when recognizable
         for cert in resume_data.certifications or []:
-            for canonical in find_skills_in_text(cert):
+            for canonical, _category in extract_canonical_skills(cert):
                 add(canonical, "explicit")
 
         skills: list[Skill] = []
         for canonical, meta in found.items():
-            category = category_of(canonical)
+            category = skill_category(canonical)
             # Deterministic proficiency heuristic: corroborated in
             # multiple sections -> "advanced", single mention -> "intermediate".
             proficiency = "advanced" if meta["hits"] >= 2 else "intermediate"

@@ -3,7 +3,10 @@
 DETERMINISTIC (no LLM call). This agent still made an LLM call in the
 codebase even though the project's LLM-usage budget assumed it didn't --
 that's fixed here. It now reuses the exact same taxonomy/alias table as
-SkillExtractorAgent (`src/skills_taxonomy.py`) to decide whether a
+SkillExtractorAgent and ExperienceEvaluatorAgent (`src/skill_taxonomy.py`
+-- Batch 3: previously this agent used a separate, overlapping
+`src/skills_taxonomy.py` module, which risked disagreeing with the other
+two agents on what a given alias normalizes to) to decide whether a
 candidate skill satisfies a JD requirement, instead of asking an LLM to
 judge "semantic"/"partial" matches freshly on every run.
 """
@@ -12,7 +15,7 @@ from typing import Any
 
 from .base import BaseAgent
 from ..models import Skill, JobRequirements, SkillMatch, SkillsMatchResult
-from ..skills_taxonomy import normalize_skill_name, find_skills_in_text
+from ..skill_taxonomy import canonical_skill_key, extract_canonical_skills
 
 
 class SkillsMatcherAgent(BaseAgent):
@@ -147,12 +150,13 @@ class SkillsMatcherAgent(BaseAgent):
 
     def _score_requirement(self, requirement: str, skills: list[Skill]) -> SkillMatch:
         """Score a single JD requirement string against the candidate's skill list."""
-        req_canonical = normalize_skill_name(requirement)
+        req_canonical_key = canonical_skill_key(requirement)
         req_key = requirement.strip().lower()
 
         # 1. Exact match: requirement string equals a candidate skill name
         #    (case-insensitive), OR both normalize to the same canonical
-        #    taxonomy entry.
+        #    taxonomy entry (e.g. requirement "JS" vs candidate skill
+        #    "JavaScript" both normalize to the same key).
         for skill in skills:
             skill_key = skill.name.strip().lower()
             if skill_key == req_key:
@@ -161,22 +165,20 @@ class SkillsMatcherAgent(BaseAgent):
                     match_quality="exact", confidence=1.0,
                     notes="Exact name match",
                 )
-            if req_canonical:
-                skill_canonical = normalize_skill_name(skill.name)
-                if skill_canonical and skill_canonical[0] == req_canonical[0]:
-                    return SkillMatch(
-                        requirement=requirement, matched=True, matched_skill=skill.name,
-                        match_quality="exact", confidence=1.0,
-                        notes=f"Both normalize to '{req_canonical[0]}'",
-                    )
+            if canonical_skill_key(skill.name) == req_canonical_key:
+                return SkillMatch(
+                    requirement=requirement, matched=True, matched_skill=skill.name,
+                    match_quality="exact", confidence=1.0,
+                    notes=f"Both normalize to '{req_canonical_key}'",
+                )
 
         # 2. Semantic (alias) match: the requirement text contains a
         #    taxonomy alias whose canonical form matches a candidate skill,
         #    or vice-versa (candidate skill alias appears in requirement).
-        req_skill_hits = find_skills_in_text(requirement)
+        req_skill_hits = {name for name, _category in extract_canonical_skills(requirement)}
         for skill in skills:
-            skill_canonical = normalize_skill_name(skill.name)
-            canonical_name = skill_canonical[0] if skill_canonical else skill.name
+            canonical_hits = extract_canonical_skills(skill.name)
+            canonical_name = canonical_hits[0][0] if canonical_hits else skill.name
             if canonical_name in req_skill_hits:
                 return SkillMatch(
                     requirement=requirement, matched=True, matched_skill=skill.name,

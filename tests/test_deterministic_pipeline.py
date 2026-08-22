@@ -46,6 +46,93 @@ def test_taxonomy_aliases():
     assert "GitHub" in names
 
 
+# ---------------------------------------------------------------------------
+# Batch 3: taxonomy consolidation. SkillExtractorAgent, SkillsMatcherAgent,
+# and ExperienceEvaluatorAgent must all resolve the SAME alias to the SAME
+# canonical skill -- otherwise a resume that lists "JS" could be extracted
+# correctly but then fail to satisfy a JD that asks for "JavaScript" (or
+# vice versa), purely because the two agents used different taxonomies.
+# ---------------------------------------------------------------------------
+
+def test_skill_agents_use_the_single_canonical_taxonomy_module():
+    """Regression guard: both agents must import their taxonomy functions
+    from src.skill_taxonomy (the one module also used by
+    ExperienceEvaluatorAgent) -- not a second, separately-defined module
+    with the same function names. Identity check, not just 'produces the
+    same answer', so a future accidental re-fork would fail loudly here."""
+    import src.skill_taxonomy as canonical_taxonomy
+    from src.agents import skill_extractor as se_mod
+    from src.agents import skills_matcher as sm_mod
+
+    assert se_mod.extract_canonical_skills is canonical_taxonomy.extract_canonical_skills
+    assert se_mod.skill_category is canonical_taxonomy.skill_category
+    assert sm_mod.extract_canonical_skills is canonical_taxonomy.extract_canonical_skills
+    assert sm_mod.canonical_skill_key is canonical_taxonomy.canonical_skill_key
+
+
+def test_extractor_and_matcher_agree_on_common_aliases():
+    """End-to-end: for each alias pair, a resume listing the SHORT form
+    must satisfy a JD requirement written in the LONG form, and vice
+    versa -- proving SkillExtractorAgent and SkillsMatcherAgent now share
+    one normalization scheme instead of two that could disagree."""
+    alias_pairs = [
+        ("JS", "JavaScript"),
+        ("ML", "Machine Learning"),
+        ("sklearn", "Scikit-learn"),
+        ("OOP", "Object Oriented Programming"),
+    ]
+    extractor = SkillExtractorAgent()
+    matcher = SkillsMatcherAgent()
+
+    async def resume_satisfies_requirement(resume_alias: str, jd_alias: str) -> bool:
+        resume_data = ResumeData(skills_section=[resume_alias])
+        extraction = await extractor.process({"resume_data": resume_data})
+        extracted_skills = extraction["extracted_skills"]
+        assert extracted_skills, f"{resume_alias!r} was not extracted as a skill at all"
+
+        reqs = JobRequirements(required_skills=[jd_alias])
+        match_state = await matcher.process({
+            "extracted_skills": extracted_skills,
+            "job_requirements": reqs,
+        })
+        match = match_state["skills_match"]
+        return match.required_skills_met == 1
+
+    for resume_alias, jd_alias in alias_pairs:
+        assert asyncio.run(resume_satisfies_requirement(resume_alias, jd_alias)), (
+            f"resume skill {resume_alias!r} should satisfy JD requirement {jd_alias!r}"
+        )
+        # And the reverse direction: JD written in the short form, resume
+        # lists the long form.
+        assert asyncio.run(resume_satisfies_requirement(jd_alias, resume_alias)), (
+            f"resume skill {jd_alias!r} should satisfy JD requirement {resume_alias!r}"
+        )
+
+
+def test_migrated_domain_specific_aliases_still_recognized():
+    """Batch 3 merged src/skills_taxonomy.py's project-specific aliases
+    (seen in this repo's own sample_data) into src/skill_taxonomy.py
+    before deleting the duplicate -- confirm they actually survived the
+    merge and are still recognized by the extractor."""
+    resume_data = ResumeData(
+        skills_section=["Heroku", "RabbitMQ", "Jira"],
+        certifications=["dbt Fundamentals"],
+        work_experience=[
+            WorkExperience(
+                title="Data Engineer", company="DataFlow Analytics",
+                responsibilities=[
+                    "Used Airflow and Snowflake for orchestration and warehousing",
+                    "Mentored two junior engineers on the team",
+                ],
+            )
+        ],
+    )
+    skills = extract_skills_from_resume(resume_data)
+    names = {s.name for s in skills}
+    for expected in ("Heroku", "RabbitMQ", "Jira", "dbt", "Airflow", "Snowflake", "Leadership"):
+        assert expected in names, f"expected {expected!r} in extracted skills, got {sorted(names)}"
+
+
 def test_skill_extraction_is_stable():
     text = SAMPLE_RESUME.read_text(encoding="utf-8")
     data = parse_resume_text(text)
