@@ -11,10 +11,10 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from .models import Base, Resume
+from .models import Base
 
 # Default to a local SQLite file at the project root. Override with
 # DATABASE_URL in .env if you ever need to point elsewhere (e.g. a
@@ -37,57 +37,50 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expi
 def init_db() -> None:
     """Create all tables if they don't already exist.
 
-    Also applies the one additive schema change this redesign needs
-    (resumes.content_hash) on databases created before that column existed,
-    and backfills hashes for existing rows. Does not delete duplicate
-    development records.
+    Safe to call multiple times -- SQLAlchemy only creates what's missing.
+    This does NOT handle general schema migrations (e.g. renaming or
+    dropping a column); that's still an Alembic concern for later. It DOES
+    run `_apply_lightweight_column_migrations`, a tiny, dependency-free
+    "add this column if it's missing" step -- just enough to let an
+    existing dev screening.db pick up new nullable columns (like
+    Resume.content_hash) without forcing a DB wipe every time the schema
+    grows by one column.
     """
     Base.metadata.create_all(bind=engine)
-    _ensure_resume_content_hash_column()
-    _backfill_resume_content_hashes()
+    _apply_lightweight_column_migrations()
 
 
-def _ensure_resume_content_hash_column() -> None:
-    """SQLite create_all will not ADD a column to an existing table."""
+def _apply_lightweight_column_migrations() -> None:
+    """Add newly-introduced nullable columns to existing SQLite tables.
+
+    `Base.metadata.create_all` only creates tables that don't exist yet --
+    it never alters an existing table, so a column added to a model after
+    the DB file was first created would otherwise silently not show up,
+    and every read/write against it would raise "no such column".
+
+    This is intentionally minimal (SQLite `ALTER TABLE ... ADD COLUMN`
+    only, nullable columns only) rather than pulling in Alembic, per the
+    project's "no unnecessary new dependencies" constraint. Add an entry
+    here whenever a column is added to an existing table.
+    """
     if not DATABASE_URL.startswith("sqlite"):
         return
-    with engine.begin() as conn:
-        rows = conn.execute(text("PRAGMA table_info(resumes)")).fetchall()
-        col_names = {row[1] for row in rows}
-        if "content_hash" not in col_names:
-            conn.execute(text("ALTER TABLE resumes ADD COLUMN content_hash VARCHAR"))
-        conn.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_resumes_content_hash ON resumes (content_hash)")
-        )
 
+    # (table_name, column_name, column_ddl_type)
+    pending_columns = [
+        ("resumes", "content_hash", "VARCHAR"),
+    ]
 
-def _backfill_resume_content_hashes() -> None:
-    """Fill content_hash for existing Resume rows that have raw_text."""
-    from sqlalchemy import or_, select
-
-    from ..document_parser import resume_content_hash
-
-    db = SessionLocal()
-    try:
-        rows = list(
-            db.scalars(
-                select(Resume).where(
-                    or_(Resume.content_hash.is_(None), Resume.content_hash == "")
+    with engine.connect() as conn:
+        for table_name, column_name, column_type in pending_columns:
+            existing_columns = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+            }
+            if column_name not in existing_columns:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
                 )
-            )
-        )
-        updated = False
-        for row in rows:
-            if row.raw_text:
-                row.content_hash = resume_content_hash(row.raw_text)
-                updated = True
-        if updated:
-            db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+        conn.commit()
 
 
 @contextmanager

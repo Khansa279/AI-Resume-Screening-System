@@ -12,6 +12,7 @@ Functions are grouped by entity and named consistently:
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +25,20 @@ from . import models
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def compute_content_hash(text: str) -> str:
+    """SHA-256 of *extracted* resume text, used to recognize 'this is the
+    same resume I've already processed' regardless of file name, upload
+    timestamp, or which literal file bytes were uploaded (a re-saved PDF
+    of the same resume extracts to the same text and should reuse it).
+
+    Whitespace is normalized before hashing so trivial extraction-order
+    differences (e.g. an extra trailing newline from one parser vs
+    another) don't defeat the dedup.
+    """
+    normalized = " ".join((text or "").split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 # ============================================================================
@@ -239,7 +254,7 @@ def create_resume(
     file_path: str = "",
     file_type: str = "unknown",
     raw_text: str = "",
-    content_hash: str = "",
+    content_hash: str | None = None,
     summary: str = "",
     skills_section: list[str] | None = None,
     certifications: list[str] | None = None,
@@ -257,6 +272,11 @@ def create_resume(
     `work_experience` items: {"title", "company", "duration", "start_date",
                                "end_date", "responsibilities": [...], "technologies": [...]}
     `skills` items: {"name", "category", "proficiency", "confidence", "source"}
+
+    `content_hash` should be `compute_content_hash(extracted_text)` --
+    callers (the service layer) are expected to check
+    `get_resume_by_content_hash` BEFORE calling this, so this function
+    itself does not dedupe; it just persists whatever hash it's given.
     """
     resume = models.Resume(
         candidate_id=candidate_id,
@@ -264,7 +284,7 @@ def create_resume(
         file_path=file_path,
         file_type=file_type,
         raw_text=raw_text,
-        content_hash=content_hash or None,
+        content_hash=content_hash,
         summary=summary,
         skills_section=skills_section or [],
         certifications=certifications or [],
@@ -296,21 +316,25 @@ def get_resume(db: Session, resume_id: int) -> Optional[models.Resume]:
 
 
 def get_resume_by_content_hash(
-    db: Session, content_hash: str
+    db: Session, position_id: int, content_hash: str
 ) -> Optional[models.Resume]:
-    """Return the earliest resume with this hash (stable reuse). Existing
-    development duplicates are ignored after the first row."""
+    """Find a previously-stored resume with identical extracted content
+    for this position. This is what lets a re-upload of the same PDF (or
+    a byte-different file that extracts to the same text) reuse the
+    existing Resume row -- and its already-parsed data/skills -- instead
+    of creating a duplicate.
+
+    Scoped to `position_id` because Resume already models "a submission
+    for a specific position"; the same person's resume submitted for two
+    different positions is still stored as two rows, unchanged from
+    today's behavior.
+    """
     if not content_hash:
         return None
     stmt = (
         select(models.Resume)
+        .where(models.Resume.position_id == position_id)
         .where(models.Resume.content_hash == content_hash)
-        .options(
-            selectinload(models.Resume.education),
-            selectinload(models.Resume.work_experience),
-            selectinload(models.Resume.skills),
-            selectinload(models.Resume.candidate),
-        )
         .order_by(models.Resume.id.asc())
     )
     return db.scalars(stmt).first()
@@ -333,23 +357,24 @@ def create_screening(
     return screening
 
 
-def get_screening_by_resume_and_jd(
+def get_or_create_screening(
     db: Session, resume_id: int, job_description_id: int
-) -> Optional[models.Screening]:
-    stmt = (
-        select(models.Screening)
-        .where(models.Screening.resume_id == resume_id)
-        .where(models.Screening.job_description_id == job_description_id)
-        .options(
-            selectinload(models.Screening.result),
-            selectinload(models.Screening.explanation),
-            selectinload(models.Screening.skill_match_result),
-            selectinload(models.Screening.experience_evaluation),
-            selectinload(models.Screening.resume).selectinload(models.Resume.candidate),
-        )
-        .order_by(models.Screening.id.asc())
-    )
-    return db.scalars(stmt).first()
+) -> models.Screening:
+    """Like create_screening, but safe to call when a resume is being
+    reused (see get_resume_by_content_hash): the (resume_id,
+    job_description_id) pair has a UNIQUE constraint
+    (uq_screening_resume_jd), so a naive create_screening() would raise
+    IntegrityError if a screening for this exact pair already exists --
+    e.g. a previous run that started but never completed. The
+    already-completed case is handled earlier by the service layer
+    (get_completed_screening_for_resume_and_jd short-circuits before we
+    get here at all), so reaching this function with an existing row
+    means a stale/incomplete screening -- reuse and re-run it rather
+    than erroring."""
+    existing = get_screening_for_resume_and_jd(db, resume_id, job_description_id)
+    if existing is not None:
+        return existing
+    return create_screening(db, resume_id, job_description_id)
 
 
 def mark_screening_started(db: Session, screening_id: int) -> None:
@@ -357,6 +382,27 @@ def mark_screening_started(db: Session, screening_id: int) -> None:
     if screening:
         screening.status = "running"
         screening.started_at = _now()
+
+
+def reset_screening_for_rerun(db: Session, screening_id: int) -> None:
+    """Clear any partial child rows (skill match, experience eval, result,
+    explanation) left over from a previous incomplete attempt at this
+    same (resume, JD) screening, so get_or_create_screening's reused row
+    can be safely repopulated without hitting the 1:1 unique constraints
+    on those child tables. Only ever called on a non-completed screening
+    (completed ones are short-circuited earlier and never reach here)."""
+    screening = db.get(models.Screening, screening_id)
+    if screening is None:
+        return
+    if screening.skill_match_result is not None:
+        db.delete(screening.skill_match_result)
+    if screening.experience_evaluation is not None:
+        db.delete(screening.experience_evaluation)
+    if screening.result is not None:
+        db.delete(screening.result)
+    if screening.explanation is not None:
+        db.delete(screening.explanation)
+    db.flush()
 
 
 def save_skill_match_result(
@@ -492,6 +538,41 @@ def list_screenings_for_job_description(
         models.Screening.job_description_id == job_description_id
     )
     return list(db.scalars(stmt))
+
+
+def get_screening_for_resume_and_jd(
+    db: Session, resume_id: int, job_description_id: int
+) -> Optional[models.Screening]:
+    """Look up the (at most one, per the uq_screening_resume_jd constraint)
+    Screening already run for this exact resume + JD-version pair,
+    regardless of status."""
+    stmt = (
+        select(models.Screening)
+        .where(models.Screening.resume_id == resume_id)
+        .where(models.Screening.job_description_id == job_description_id)
+        .options(
+            selectinload(models.Screening.result),
+            selectinload(models.Screening.explanation),
+            selectinload(models.Screening.skill_match_result),
+            selectinload(models.Screening.experience_evaluation),
+            selectinload(models.Screening.resume).selectinload(models.Resume.candidate),
+        )
+    )
+    return db.scalar(stmt)
+
+
+def get_completed_screening_for_resume_and_jd(
+    db: Session, resume_id: int, job_description_id: int
+) -> Optional[models.Screening]:
+    """Same as `get_screening_for_resume_and_jd`, but only returns it if
+    the screening actually finished (`status == "completed"`, i.e. it has
+    a ScreeningResult). This is the check the service layer uses to
+    decide whether a rerun can be answered with 0 LLM calls by just
+    returning the stored result."""
+    screening = get_screening_for_resume_and_jd(db, resume_id, job_description_id)
+    if screening is not None and screening.status == "completed":
+        return screening
+    return None
 
 
 # ============================================================================

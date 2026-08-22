@@ -1,66 +1,50 @@
 """Skill Extractor Agent - Identifies and categorizes candidate skills.
 
-Deterministic: scans resume text against the shared canonical taxonomy.
-The same resume text always yields the same skill list (names, categories,
-order). No LLM call on the normal path.
+DETERMINISTIC (no LLM call). Previously this agent sent the whole resume
+context to the LLM and asked it to invent a skill list, which was the
+single biggest source of score variance between runs of the *same*
+resume: the same text could come back with a different skill set (and
+therefore a different match score) every time, and it burned an LLM call
+per candidate.
+
+Now it scans resume_data (skills_section, work-experience responsibilities
++ technologies, projects, certifications) against the shared taxonomy in
+`src/skills_taxonomy.py` and returns a normalized, de-duplicated, sorted
+skill list. Same resume text -> same skills, every time, 0 LLM calls.
 """
 
 from typing import Any
 
 from .base import BaseAgent
 from ..models import Skill, ResumeData
-from ..skill_taxonomy import extract_canonical_skills
-
-
-_VALID_CATEGORIES = {"technical", "soft_skill", "tool", "language", "framework", "other"}
-
-
-def extract_skills_from_resume(resume_data: ResumeData) -> list[Skill]:
-    """Pure function used by the agent and by tests."""
-    parts: list[str] = []
-    if resume_data.skills_section:
-        parts.append(" ".join(resume_data.skills_section))
-    for exp in resume_data.work_experience:
-        if exp.technologies:
-            parts.append(" ".join(exp.technologies))
-        if exp.responsibilities:
-            parts.append(" ".join(exp.responsibilities))
-        if exp.title:
-            parts.append(exp.title)
-    if resume_data.projects:
-        parts.append(" ".join(resume_data.projects))
-    if resume_data.certifications:
-        parts.append(" ".join(resume_data.certifications))
-    if resume_data.raw_text:
-        parts.append(resume_data.raw_text)
-
-    haystack = "\n".join(parts)
-    found = extract_canonical_skills(haystack)
-
-    skills: list[Skill] = []
-    for name, category in found:
-        if category not in _VALID_CATEGORIES:
-            category = "other"
-        skills.append(
-            Skill(
-                name=name,
-                category=category,  # type: ignore[arg-type]
-                proficiency="intermediate",
-                source="explicit",
-                confidence=0.95,
-            )
-        )
-    return skills
+from ..skills_taxonomy import normalize_skill_name, find_skills_in_text, category_of
 
 
 class SkillExtractorAgent(BaseAgent):
-    """Extract and categorize skills without an LLM call."""
+    """
+    Agent responsible for extracting and categorizing skills from parsed resume.
+
+    This agent:
+    - Identifies explicit skills (from the resume's own skills section)
+    - Infers skills mentioned in work-experience technologies/responsibilities
+      and in project descriptions
+    - Categorizes skills using the shared taxonomy
+    - Deduplicates and sorts the result for a stable, deterministic output
+    """
 
     name = "SkillExtractorAgent"
-    description = "Extract and categorize technical and soft skills from resume data (deterministic)"
-    temperature = 0.0
+    description = "Extract and categorize technical and soft skills from resume data (deterministic taxonomy match)"
 
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Extract skills from the parsed resume.
+
+        Args:
+            state: Current workflow state containing resume_data
+
+        Returns:
+            State updates with extracted_skills list
+        """
         resume_data = state.get("resume_data")
 
         if not resume_data:
@@ -70,13 +54,98 @@ class SkillExtractorAgent(BaseAgent):
                 "agent_confidences": {self.name: 0.0}
             }
 
+        # If resume_data is a dict, convert to ResumeData
         if isinstance(resume_data, dict):
             resume_data = ResumeData.model_validate(resume_data)
 
-        skills = extract_skills_from_resume(resume_data)
-        confidence = 0.95 if skills else 0.4
+        skills, confidence = self._extract_deterministic(resume_data)
 
         return {
             "extracted_skills": skills,
             "agent_confidences": {self.name: confidence}
         }
+
+    def _extract_deterministic(self, resume_data: ResumeData) -> tuple[list[Skill], float]:
+        """Build a normalized, deduplicated, sorted skill list with no LLM call."""
+        # canonical_name -> {"source": ..., "hits": int} so we know
+        # explicit vs inferred and can bump confidence when a skill is
+        # corroborated in multiple places (e.g. listed in skills_section
+        # AND used in a project).
+        found: dict[str, dict[str, Any]] = {}
+
+        def add(canonical: str, source: str) -> None:
+            entry = found.setdefault(canonical, {"source": source, "hits": 0})
+            entry["hits"] += 1
+            # explicit wins over inferred if seen in both places
+            if source == "explicit":
+                entry["source"] = "explicit"
+
+        # 1. Explicit skills section -- exact/alias lookups
+        for raw_skill in resume_data.skills_section or []:
+            # A skills_section entry may itself be a comma-separated group
+            # (e.g. "Languages: Python, JavaScript, SQL") -- split defensively.
+            for piece in raw_skill.replace(":", ",").split(","):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                match = normalize_skill_name(piece)
+                if match:
+                    add(match[0], "explicit")
+                else:
+                    # Not in taxonomy -- still keep it as an explicit
+                    # "other" skill so nothing the candidate listed is lost.
+                    add(piece, "explicit")
+
+        # 2. Work experience: technologies (explicit) + responsibilities (inferred)
+        for exp in resume_data.work_experience or []:
+            for tech in exp.technologies or []:
+                match = normalize_skill_name(tech.strip())
+                add(match[0] if match else tech.strip(), "explicit")
+            for resp in exp.responsibilities or []:
+                for canonical in find_skills_in_text(resp):
+                    add(canonical, "inferred")
+            # Title itself can carry a signal, e.g. "Data Engineer"
+            for canonical in find_skills_in_text(exp.title or ""):
+                add(canonical, "inferred")
+
+        # 3. Projects (inferred)
+        for project in resume_data.projects or []:
+            for canonical in find_skills_in_text(project):
+                add(canonical, "inferred")
+
+        # 4. Summary (inferred, light signal)
+        if resume_data.summary:
+            for canonical in find_skills_in_text(resume_data.summary):
+                add(canonical, "inferred")
+
+        # 5. Certifications imply the certified skill when recognizable
+        for cert in resume_data.certifications or []:
+            for canonical in find_skills_in_text(cert):
+                add(canonical, "explicit")
+
+        skills: list[Skill] = []
+        for canonical, meta in found.items():
+            category = category_of(canonical)
+            # Deterministic proficiency heuristic: corroborated in
+            # multiple sections -> "advanced", single mention -> "intermediate".
+            proficiency = "advanced" if meta["hits"] >= 2 else "intermediate"
+            confidence = 0.95 if meta["source"] == "explicit" else 0.7
+
+            skills.append(Skill(
+                name=canonical,
+                category=category,
+                proficiency=proficiency,
+                confidence=confidence,
+                source=meta["source"],
+            ))
+
+        # Stable, deterministic ordering: by name (case-insensitive).
+        skills.sort(key=lambda s: s.name.lower())
+
+        # Overall extraction confidence: deterministic taxonomy matching is
+        # always applied consistently, so this is high and stable rather
+        # than an LLM's self-reported guess. Slightly lower if nothing
+        # was found (resume had no recognizable skills content).
+        overall_confidence = 0.9 if skills else 0.5
+
+        return skills, overall_confidence

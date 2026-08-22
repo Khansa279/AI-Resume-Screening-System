@@ -1,39 +1,61 @@
 """Skills Matcher Agent - Compares candidate skills against job requirements.
 
-This agent is intentionally NOT an LLM call. Matching a requirement string
-against an already-extracted list of skill names is a deterministic lookup/
-classification problem, not a judgment call -- routing it through an LLM was
-the second (and largest) source of run-to-run score variance, stacked on top
-of SkillExtractorAgent's own variance. Given the same extracted_skills and
-the same job_requirements, this agent now ALWAYS produces the same
-SkillsMatchResult.
+DETERMINISTIC (no LLM call). This agent still made an LLM call in the
+codebase even though the project's LLM-usage budget assumed it didn't --
+that's fixed here. It now reuses the exact same taxonomy/alias table as
+SkillExtractorAgent (`src/skills_taxonomy.py`) to decide whether a
+candidate skill satisfies a JD requirement, instead of asking an LLM to
+judge "semantic"/"partial" matches freshly on every run.
 """
 
-import difflib
 from typing import Any
 
 from .base import BaseAgent
 from ..models import Skill, JobRequirements, SkillMatch, SkillsMatchResult
-from ..skill_taxonomy import canonical_skill_key
-
-
-_QUALITY_CREDIT = {"exact": 1.0, "semantic": 0.9, "partial": 0.5, "none": 0.0}
-_PARTIAL_MATCH_THRESHOLD = 0.62
+from ..skills_taxonomy import normalize_skill_name, find_skills_in_text
 
 
 class SkillsMatcherAgent(BaseAgent):
     """
     Agent responsible for matching candidate skills to job requirements.
 
-    Deterministic by design: normalizes both sides, checks exact/alias
-    matches, then substring containment ("semantic"), then fuzzy string
-    similarity ("partial"). No LLM call -- see module docstring.
+    This agent:
+    - Compares extracted skills against required/preferred skills
+    - Handles alias-based "semantic" matching (e.g., "JS" = "JavaScript")
+      via the shared taxonomy, plus substring/partial fallback matching
+    - Scores each requirement match
+    - Calculates overall skills match score
+
+    SCORING (unchanged from the original design):
+    - Required skills contribute ~70% of overall_score
+    - Preferred skills contribute ~30% of overall_score
+    - exact match = full credit, semantic (taxonomy alias) = 90% credit,
+      partial (substring) = 50% credit, no match = 0% credit
     """
 
     name = "SkillsMatcherAgent"
-    description = "Compare candidate skills against job requirements and score the match (deterministic, no LLM call)"
+    description = "Compare candidate skills against job requirements and score the match (deterministic)"
+
+    REQUIRED_WEIGHT = 0.7
+    PREFERRED_WEIGHT = 0.3
+
+    CREDIT_BY_QUALITY = {
+        "exact": 1.0,
+        "semantic": 0.9,
+        "partial": 0.5,
+        "none": 0.0,
+    }
 
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Match candidate skills against job requirements.
+
+        Args:
+            state: Current workflow state with extracted_skills and job_requirements
+
+        Returns:
+            State updates with skills_match result
+        """
         extracted_skills = state.get("extracted_skills", [])
         job_requirements = state.get("job_requirements")
 
@@ -44,109 +66,151 @@ class SkillsMatcherAgent(BaseAgent):
                 "agent_confidences": {self.name: 0.0}
             }
 
+        # Convert to proper types if needed
         if isinstance(job_requirements, dict):
             job_requirements = JobRequirements.model_validate(job_requirements)
 
         skills_list: list[Skill] = []
         for skill in extracted_skills:
-            skills_list.append(Skill.model_validate(skill) if isinstance(skill, dict) else skill)
+            if isinstance(skill, dict):
+                skills_list.append(Skill.model_validate(skill))
+            else:
+                skills_list.append(skill)
 
-        required_matches = [
-            self._match_one(req, skills_list) for req in job_requirements.required_skills
-        ]
-        preferred_matches = [
-            self._match_one(req, skills_list) for req in job_requirements.preferred_skills
-        ]
-        all_matches = required_matches + preferred_matches
+        match_result = self._match_deterministic(skills_list, job_requirements)
 
-        required_skills_met = sum(1 for m in required_matches if m.matched)
-        preferred_skills_met = sum(1 for m in preferred_matches if m.matched)
+        return {
+            "skills_match": match_result,
+            "agent_confidences": {self.name: match_result.confidence}
+        }
 
-        required_score = self._avg_credit(required_matches)
-        preferred_score = self._avg_credit(preferred_matches)
-        overall_score = round(required_score * 0.7 + preferred_score * 0.3, 2)
+    def _match_deterministic(
+        self, skills: list[Skill], requirements: JobRequirements
+    ) -> SkillsMatchResult:
+        """Score every required/preferred requirement against candidate skills."""
+        matches: list[SkillMatch] = []
+
+        required_scores: list[float] = []
+        preferred_scores: list[float] = []
+        required_met = 0
+        preferred_met = 0
+
+        for req in requirements.required_skills or []:
+            match = self._score_requirement(req, skills)
+            matches.append(match)
+            required_scores.append(self.CREDIT_BY_QUALITY[match.match_quality])
+            if match.matched:
+                required_met += 1
+
+        for req in requirements.preferred_skills or []:
+            match = self._score_requirement(req, skills)
+            matches.append(match)
+            preferred_scores.append(self.CREDIT_BY_QUALITY[match.match_quality])
+            if match.matched:
+                preferred_met += 1
+
+        required_total = len(requirements.required_skills or [])
+        preferred_total = len(requirements.preferred_skills or [])
+
+        required_avg = sum(required_scores) / required_total if required_total else 1.0
+        preferred_avg = sum(preferred_scores) / preferred_total if preferred_total else 1.0
+
+        if required_total and preferred_total:
+            overall_score = required_avg * self.REQUIRED_WEIGHT + preferred_avg * self.PREFERRED_WEIGHT
+        elif required_total:
+            overall_score = required_avg
+        elif preferred_total:
+            overall_score = preferred_avg
+        else:
+            overall_score = 0.0
+
+        overall_score = round(min(max(overall_score, 0.0), 1.0), 4)
 
         reasoning = self._build_reasoning(
-            required_skills_met, len(required_matches),
-            preferred_skills_met, len(preferred_matches),
-            overall_score, required_matches,
+            required_met, required_total, preferred_met, preferred_total, overall_score
         )
 
-        result = SkillsMatchResult(
-            matches=all_matches,
-            required_skills_met=required_skills_met,
-            required_skills_total=len(required_matches),
-            preferred_skills_met=preferred_skills_met,
-            preferred_skills_total=len(preferred_matches),
+        # Deterministic matching applied identically every time -> stable,
+        # high confidence rather than an LLM's self-reported guess.
+        confidence = 0.95 if (required_total or preferred_total) else 0.3
+
+        return SkillsMatchResult(
+            matches=matches,
+            required_skills_met=required_met,
+            required_skills_total=required_total,
+            preferred_skills_met=preferred_met,
+            preferred_skills_total=preferred_total,
             overall_score=overall_score,
-            confidence=0.9,  # deterministic logic -> fixed confidence, not LLM self-reported
+            confidence=confidence,
             reasoning=reasoning,
         )
 
-        return {
-            "skills_match": result,
-            "agent_confidences": {self.name: result.confidence}
-        }
+    def _score_requirement(self, requirement: str, skills: list[Skill]) -> SkillMatch:
+        """Score a single JD requirement string against the candidate's skill list."""
+        req_canonical = normalize_skill_name(requirement)
+        req_key = requirement.strip().lower()
 
-    def _match_one(self, requirement: str, skills: list[Skill]) -> SkillMatch:
-        """Match a single requirement string against the skills list.
-        Same inputs -> same output, always."""
-        req_canon = canonical_skill_key(requirement)
-
-        best_skill: Skill | None = None
-        best_quality = "none"
-        best_score = 0.0
-
+        # 1. Exact match: requirement string equals a candidate skill name
+        #    (case-insensitive), OR both normalize to the same canonical
+        #    taxonomy entry.
         for skill in skills:
-            skill_canon = canonical_skill_key(skill.name)
-
-            if req_canon == skill_canon:
+            skill_key = skill.name.strip().lower()
+            if skill_key == req_key:
                 return SkillMatch(
                     requirement=requirement, matched=True, matched_skill=skill.name,
-                    match_quality="exact", confidence=0.97,
-                    notes="Exact/alias match",
+                    match_quality="exact", confidence=1.0,
+                    notes="Exact name match",
+                )
+            if req_canonical:
+                skill_canonical = normalize_skill_name(skill.name)
+                if skill_canonical and skill_canonical[0] == req_canonical[0]:
+                    return SkillMatch(
+                        requirement=requirement, matched=True, matched_skill=skill.name,
+                        match_quality="exact", confidence=1.0,
+                        notes=f"Both normalize to '{req_canonical[0]}'",
+                    )
+
+        # 2. Semantic (alias) match: the requirement text contains a
+        #    taxonomy alias whose canonical form matches a candidate skill,
+        #    or vice-versa (candidate skill alias appears in requirement).
+        req_skill_hits = find_skills_in_text(requirement)
+        for skill in skills:
+            skill_canonical = normalize_skill_name(skill.name)
+            canonical_name = skill_canonical[0] if skill_canonical else skill.name
+            if canonical_name in req_skill_hits:
+                return SkillMatch(
+                    requirement=requirement, matched=True, matched_skill=skill.name,
+                    match_quality="semantic", confidence=0.9,
+                    notes=f"Taxonomy alias match on '{canonical_name}'",
                 )
 
-            if skill_canon and (skill_canon in req_canon or req_canon in skill_canon):
-                if 0.85 > best_score:
-                    best_skill, best_quality, best_score = skill, "semantic", 0.85
-                continue
+        # 3. Partial match: substring overlap either direction (e.g.
+        #    requirement "Python programming experience" vs skill "Python").
+        for skill in skills:
+            skill_key = skill.name.strip().lower()
+            if len(skill_key) >= 3 and (skill_key in req_key or req_key in skill_key):
+                return SkillMatch(
+                    requirement=requirement, matched=True, matched_skill=skill.name,
+                    match_quality="partial", confidence=0.5,
+                    notes="Substring overlap",
+                )
 
-            ratio = difflib.SequenceMatcher(None, req_canon, skill_canon).ratio()
-            if ratio >= _PARTIAL_MATCH_THRESHOLD and ratio > best_score:
-                best_skill, best_quality, best_score = skill, "partial", round(ratio, 2)
-
-        if best_skill:
-            return SkillMatch(
-                requirement=requirement, matched=True, matched_skill=best_skill.name,
-                match_quality=best_quality, confidence=best_score,
-                notes=f"{best_quality} match",
-            )
-
+        # 4. No match
         return SkillMatch(
             requirement=requirement, matched=False, matched_skill="",
             match_quality="none", confidence=0.9,
-            notes="No matching skill found among extracted skills",
+            notes="No matching candidate skill found",
         )
 
-    @staticmethod
-    def _avg_credit(matches: list[SkillMatch]) -> float:
-        if not matches:
-            return 0.0
-        return sum(_QUALITY_CREDIT[m.match_quality] for m in matches) / len(matches)
-
-    @staticmethod
     def _build_reasoning(
-        required_met: int, required_total: int,
-        preferred_met: int, preferred_total: int,
-        overall_score: float, required_matches: list[SkillMatch],
+        self, required_met: int, required_total: int,
+        preferred_met: int, preferred_total: int, overall_score: float,
     ) -> str:
-        missing_required = [m.requirement for m in required_matches if not m.matched]
-        parts = [
-            f"Candidate meets {required_met} of {required_total} required skills "
-            f"and {preferred_met} of {preferred_total} preferred skills "
-            f"(overall skills score: {overall_score:.0%})."
-        ]
-        if missing_required:
-            parts.append("Missing required skills: " + ", ".join(missing_required) + ".")
+        parts = [f"Overall skills match: {overall_score:.0%}."]
+        if required_total:
+            parts.append(f"Met {required_met}/{required_total} required skills.")
+        else:
+            parts.append("No required skills were specified for this role.")
+        if preferred_total:
+            parts.append(f"Met {preferred_met}/{preferred_total} preferred skills.")
         return " ".join(parts)

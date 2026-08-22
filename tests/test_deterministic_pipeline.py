@@ -16,7 +16,7 @@ from src.models import (
     Skill,
     SkillsMatchResult,
 )
-from src.skill_taxonomy import canonical_skill_key, extract_canonical_skills
+from src.skills_taxonomy import canonical_skill_key, extract_canonical_skills
 
 
 SAMPLE_RESUME = Path("sample_data/resumes/senior_python_dev.txt")

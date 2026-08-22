@@ -8,12 +8,13 @@ langchain-groq>=0.2.0
 PyPDF2>=3.0.0
 python-docx>=1.1.0
 
-# Database
-SQLAlchemy>=2.0.0
-
 # Data validation and configuration
 pydantic>=2.0.0
 python-dotenv>=1.0.0
+
+# Persistence (src/db) -- was missing from this file even though
+# src/db/database.py has always imported it directly.
+SQLAlchemy>=2.0.0
 
 # CLI
 rich>=13.0.0

@@ -129,6 +129,13 @@ class ResumeScreeningWorkflow:
     
     def _parse_document_node(self, state: WorkflowState) -> dict:
         """Node: Parse the resume document to extract raw text."""
+        # If a caller already supplied fully-hydrated resume_data (e.g.
+        # the service layer reusing a previously-parsed Resume row by
+        # content hash), there's nothing for this node OR the parser node
+        # after it to do -- skip straight through.
+        if state.get("resume_data"):
+            return {}
+
         resume_path = state.get("resume_path", "")
         
         if not resume_path:
@@ -154,7 +161,10 @@ class ResumeScreeningWorkflow:
         }
     
     async def _parse_resume_node(self, state: WorkflowState) -> dict:
-        """Node: Parse resume text into structured data."""
+        """Node: Parse resume text into structured data (skipped if the
+        caller already supplied resume_data, e.g. reused from a resume
+        with matching content_hash -- avoids an LLM call for content
+        we've already parsed once)."""
         if state.get("resume_data"):
             return {}
         return await self.resume_parser.process(dict(state))
@@ -168,7 +178,9 @@ class ResumeScreeningWorkflow:
         return await self.job_analyzer.process(dict(state))
     
     async def _extract_skills_node(self, state: WorkflowState) -> dict:
-        """Node: Extract skills from parsed resume."""
+        """Node: Extract skills from parsed resume (skipped if the caller
+        already supplied extracted_skills, e.g. reused alongside a
+        resume with matching content_hash)."""
         if state.get("extracted_skills"):
             return {}
         return await self.skill_extractor.process(dict(state))
@@ -182,8 +194,80 @@ class ResumeScreeningWorkflow:
         return await self.experience_evaluator.process(dict(state))
     
     async def _synthesize_decision_node(self, state: WorkflowState) -> dict:
-        """Node: Synthesize final decision."""
+        """Node: Synthesize final decision.
+
+        Guarded against double-invocation. This node has two incoming
+        edges (match_skills, evaluate_experience) that reach it via
+        branches of different lengths (match_skills is parse_resume ->
+        extract_skills -> match_skills; evaluate_experience is
+        parse_resume -> evaluate_experience directly), so LangGraph can
+        schedule this node once per incoming edge instead of once after
+        both are ready -- observed empirically (see
+        src/scripts/test_batch1_resume_reuse.py) as
+        DecisionSynthesizerAgent's LLM call firing twice per screening.
+        Since this node makes an LLM call, that silently doubled decision
+        -reasoning token usage on every single run, independent of the
+        resume/screening reuse work in Batch 1. This guard is a minimal,
+        non-structural fix: once this node has already produced
+        final_output in this graph run, later invocations are a no-op.
+        """
+        if state.get("workflow_complete") and state.get("final_output"):
+            return {}
         return await self.decision_synthesizer.process(dict(state))
+    
+    async def run(
+        self,
+        resume_path: str = "",
+        resume_text: str = "",
+        job_description: str = ""
+    ) -> ScreeningOutput:
+        """
+        Run the complete screening workflow.
+        
+        Args:
+            resume_path: Path to resume file (PDF, DOCX, or TXT)
+            resume_text: Raw resume text (alternative to file path)
+            job_description: The job description text
+            
+        Returns:
+            ScreeningOutput with match score, recommendation, and reasoning
+        """
+        # Initialize state
+        initial_state: WorkflowState = {
+            "resume_path": resume_path,
+            "resume_raw_text": resume_text,
+            "job_description": job_description,
+            "resume_data": None,
+            "extracted_skills": [],
+            "job_requirements": None,
+            "skills_match": None,
+            "experience_eval": None,
+            "final_output": None,
+            "errors": [],
+            "agent_confidences": {},
+            "workflow_complete": False,
+        }
+        
+        # Run the workflow
+        final_state = await self.graph.ainvoke(initial_state)
+        
+        # Extract and return the final output
+        output_data = final_state.get("final_output")
+        
+        if output_data:
+            if isinstance(output_data, dict):
+                return ScreeningOutput.model_validate(output_data)
+            return output_data
+        
+        # Fallback if no output
+        return ScreeningOutput(
+            match_score=0.0,
+            recommendation="Error - workflow did not complete",
+            requires_human=True,
+            confidence=0.0,
+            reasoning_summary="The workflow failed to produce a result. Please review manually.",
+            flags=["Workflow error"]
+        )
     
     async def run_full(
         self,
@@ -198,9 +282,36 @@ class ResumeScreeningWorkflow:
         Run the complete screening workflow and return the FULL final
         state (not just the synthesized output).
 
-        Pre-filled resume_data / extracted_skills / job_requirements skip
-        the corresponding nodes (same pattern as cached JobRequirements).
+        This exists because a caller that wants to persist results
+        (SkillMatchResult, ExperienceEvaluation, an Explanation built from
+        the match/eval detail) needs more than ScreeningOutput alone --
+        run() below only ever returned final_output and threw the rest
+        away. Any code doing DB persistence should call this instead of
+        run().
+
+        Args:
+            resume_path: Path to resume file (PDF, DOCX, or TXT)
+            resume_text: Raw resume text (alternative to file path)
+            job_description: The job description text
+            job_requirements: Optional pre-parsed requirements dict. Pass
+                this when screening many candidates against the same
+                position so JobAnalyzerAgent only runs once per JD
+                version instead of once per resume.
+            resume_data: Optional pre-parsed resume dict (shape of
+                src.models.ResumeData). Pass this when the caller has
+                already parsed this exact resume content before (see
+                services.screening_service's content-hash resume reuse)
+                so document parsing + ResumeParserAgent are both skipped.
+            extracted_skills: Optional pre-extracted skills list (shape of
+                list[src.models.Skill] as dicts). Pass alongside
+                resume_data to also skip SkillExtractorAgent.
+
+        Returns:
+            The full WorkflowState dict after the graph finishes --
+            includes resume_data, extracted_skills, job_requirements,
+            skills_match, experience_eval, final_output, errors, etc.
         """
+        
         initial_state: WorkflowState = {
             "resume_path": resume_path,
             "resume_raw_text": resume_text,
@@ -219,38 +330,52 @@ class ResumeScreeningWorkflow:
         return await self.graph.ainvoke(initial_state)
 
     async def run(
-        self,
-        resume_path: str = "",
-        resume_text: str = "",
-        job_description: str = "",
-        job_requirements: dict | None = None,
-        resume_data: dict | None = None,
-        extracted_skills: list | None = None,
-    ) -> ScreeningOutput:
-        """Run the workflow and return only ScreeningOutput."""
-        final_state = await self.run_full(
-            resume_path=resume_path,
-            resume_text=resume_text,
-            job_description=job_description,
-            job_requirements=job_requirements,
-            resume_data=resume_data,
-            extracted_skills=extracted_skills,
-        )
+            self,
+            resume_path: str = "",
+            resume_text: str = "",
+            job_description: str = "",
+            job_requirements: dict | None = None,
+            resume_data: dict | None = None,
+            extracted_skills: list | None = None,
+        ) -> ScreeningOutput:
+            """
+            Run the complete screening workflow.
 
-        output_data = final_state.get("final_output")
+            Args:
+                resume_path: Path to resume file (PDF, DOCX, or TXT)
+                resume_text: Raw resume text (alternative to file path)
+                job_description: The job description text
+                job_requirements: Optional pre-parsed requirements dict (see
+                    run_full for why you'd pass this)
+                resume_data: Optional pre-parsed resume dict (see run_full)
+                extracted_skills: Optional pre-extracted skills list (see run_full)
 
-        if output_data:
-            if isinstance(output_data, dict):
-                return ScreeningOutput.model_validate(output_data)
-            return output_data
+            Returns:
+                ScreeningOutput with match score, recommendation, and reasoning
+            """
+            final_state = await self.run_full(
+                resume_path=resume_path,
+                resume_text=resume_text,
+                job_description=job_description,
+                job_requirements=job_requirements,
+                resume_data=resume_data,
+                extracted_skills=extracted_skills,
+            )
 
-        return ScreeningOutput(
-            match_score=0.0,
-            recommendation="Error - workflow did not complete",
-            requires_human=True,
-            confidence=0.0,
-            reasoning_summary="The workflow failed to produce a result. Please review manually.",
-            flags=["Workflow error"]
+            output_data = final_state.get("final_output")
+
+            if output_data:
+                if isinstance(output_data, dict):
+                    return ScreeningOutput.model_validate(output_data)
+                return output_data
+
+            return ScreeningOutput(
+                match_score=0.0,
+                recommendation="Error - workflow did not complete",
+                requires_human=True,
+                confidence=0.0,
+                reasoning_summary="The workflow failed to produce a result. Please review manually.",
+                flags=["Workflow error"]
         )
         
     def run_sync(

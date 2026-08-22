@@ -233,11 +233,17 @@ class Resume(Base):
     position_id = Column(Integer, ForeignKey("positions.id"), nullable=False)
     file_path = Column(String, nullable=True)
     file_type = Column(String, default="unknown")  # pdf | docx | txt | unknown
-    raw_text = Column(Text, default="")
-    # SHA-256 of whitespace-normalized extracted text. Indexed (not unique)
-    # so existing development duplicates can be backfilled; application
-    # logic reuses the earliest matching row instead of inserting another.
+    # SHA-256 of the *extracted* resume text (not the raw file bytes -- two
+    # different files that extract to the same text, e.g. a re-saved PDF,
+    # should still be recognized as the same resume). Nullable so existing
+    # rows created before this column existed don't break; new rows always
+    # get one written (see repository.create_resume / services.screening_service).
+    # Scoped to (position_id, content_hash) via the unique constraint below:
+    # the same resume content submitted for two different positions is
+    # intentionally treated as two separate Resume rows, since Resume is
+    # already modeled as "a submission for a specific position."
     content_hash = Column(String, nullable=True, index=True)
+    raw_text = Column(Text, default="")
     summary = Column(Text, default="")
     skills_section = Column(JSON, default=list)  # list[str], as explicitly listed on resume
     certifications = Column(JSON, default=list)  # list[str]
