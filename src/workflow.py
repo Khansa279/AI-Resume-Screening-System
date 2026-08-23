@@ -44,7 +44,10 @@ class WorkflowState(TypedDict, total=False):
     
     # Agent outputs
     resume_data: dict | None
-    extracted_skills: list
+    # None = SkillExtractorAgent has not actually run yet (distinct from
+    # [], which means it ran and genuinely found no recognizable skills).
+    # match_skills relies on this distinction -- see _match_skills_node.
+    extracted_skills: list | None
     job_requirements: dict | None
     skills_match: dict | None
     experience_eval: dict | None
@@ -186,7 +189,45 @@ class ResumeScreeningWorkflow:
         return await self.skill_extractor.process(dict(state))
     
     async def _match_skills_node(self, state: WorkflowState) -> dict:
-        """Node: Match skills against requirements."""
+        """Node: Match skills against requirements.
+
+        Guarded against premature fan-in. match_skills has two incoming
+        edges -- extract_skills (parse_resume -> extract_skills, depth 3
+        from parse_document) and analyze_job (depth 2) -- of different
+        lengths, so LangGraph schedules this node once per incoming edge
+        that resolves rather than once after BOTH are ready. Whichever
+        edge resolves first (in practice: analyze_job, since it depends
+        on an LLM call whose latency varies, could resolve before or
+        after extract_skills, which is fully deterministic) triggers an
+        invocation where the OTHER input is still missing.
+
+        Before this guard, that premature invocation still ran
+        SkillsMatcherAgent, which happily scored the requirement list
+        against an empty (not-yet-populated) extracted_skills list --
+        producing a fully-formed but WRONG SkillsMatchResult (e.g.
+        "0 of 7 required skills met") that got written into shared
+        state. Because extracted_skills defaults to [] rather than a
+        distinguishable "not computed yet" sentinel, that wrong result
+        was indistinguishable from a resume that genuinely has zero
+        matching skills, so nothing downstream (including
+        DecisionSynthesizerAgent's own guard, which locks in whatever
+        skills_match is present the first time it runs) could tell it
+        apart from the real answer that a later, correctly-timed
+        invocation would have computed once extract_skills actually
+        finished. This is the exact same "idempotency guard locks in a
+        premature result" failure mode Batch 4 diagnosed for this node
+        -- reintroduced one hop upstream once DecisionSynthesizerAgent
+        gained its own idempotency guard.
+
+        Fix: extracted_skills is now None (not []) until
+        SkillExtractorAgent has genuinely run once (see WorkflowState),
+        so a premature firing -- either input still missing -- is simply
+        skipped (no-op) instead of computing a wrong result. The later
+        invocation, triggered once the slower of the two real
+        predecessors finishes, does the real (and only) computation.
+        """
+        if state.get("extracted_skills") is None or not state.get("job_requirements"):
+            return {}
         return await self.skills_matcher.process(dict(state))
     
     async def _evaluate_experience_node(self, state: WorkflowState) -> dict:
@@ -196,22 +237,29 @@ class ResumeScreeningWorkflow:
     async def _synthesize_decision_node(self, state: WorkflowState) -> dict:
         """Node: Synthesize final decision.
 
-        Guarded against double-invocation. This node has two incoming
-        edges (match_skills, evaluate_experience) that reach it via
-        branches of different lengths (match_skills is parse_resume ->
-        extract_skills -> match_skills; evaluate_experience is
-        parse_resume -> evaluate_experience directly), so LangGraph can
-        schedule this node once per incoming edge instead of once after
-        both are ready -- observed empirically (see
-        src/scripts/test_batch1_resume_reuse.py) as
-        DecisionSynthesizerAgent's LLM call firing twice per screening.
-        Since this node makes an LLM call, that silently doubled decision
-        -reasoning token usage on every single run, independent of the
-        resume/screening reuse work in Batch 1. This guard is a minimal,
-        non-structural fix: once this node has already produced
-        final_output in this graph run, later invocations are a no-op.
+        Guarded on two independent conditions:
+
+        1. Already complete -- once this node has produced final_output
+           in this graph run, later invocations are a no-op. This is
+           what prevents DecisionSynthesizerAgent's LLM call from firing
+           twice (this node also has two incoming edges of different
+           depths -- match_skills, evaluate_experience -- for the same
+           reason described on _match_skills_node).
+        2. Not yet ready -- skills_match/experience_eval can each still
+           be None the first time this node is invoked (same fan-in
+           race as above, one hop downstream). Previously this node
+           would fall through to DecisionSynthesizerAgent, which treats
+           a missing skills_match/experience_eval as a hard error and
+           returns an error ScreeningOutput with workflow_complete=True
+           -- and guard #1 would then permanently lock in that error
+           result once the *real* skills_match/experience_eval arrived
+           moments later. Skipping (without setting workflow_complete)
+           when either input is still missing lets the later,
+           genuinely-ready invocation run for real -- exactly once.
         """
         if state.get("workflow_complete") and state.get("final_output"):
+            return {}
+        if state.get("skills_match") is None or state.get("experience_eval") is None:
             return {}
         return await self.decision_synthesizer.process(dict(state))
     
@@ -238,7 +286,7 @@ class ResumeScreeningWorkflow:
             "resume_raw_text": resume_text,
             "job_description": job_description,
             "resume_data": None,
-            "extracted_skills": [],
+            "extracted_skills": None,
             "job_requirements": None,
             "skills_match": None,
             "experience_eval": None,
@@ -317,7 +365,12 @@ class ResumeScreeningWorkflow:
             "resume_raw_text": resume_text,
             "job_description": job_description,
             "resume_data": resume_data,
-            "extracted_skills": extracted_skills or [],
+            # Preserve None (not yet extracted) vs. [] (caller reused a
+            # resume that was genuinely found to have zero skills) --
+            # collapsing both to [] is what let match_skills mistake "not
+            # computed yet" for "computed, found nothing". See
+            # WorkflowState.extracted_skills and _match_skills_node.
+            "extracted_skills": extracted_skills,
             "job_requirements": job_requirements,
             "skills_match": None,
             "experience_eval": None,
