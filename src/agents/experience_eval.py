@@ -13,7 +13,7 @@ from typing import Any
 
 from .base import BaseAgent
 from ..models import ResumeData, JobRequirements, ExperienceEvaluation, WorkExperience
-from ..skill_taxonomy import canonical_skill_key, normalize_skill_text
+from ..skill_taxonomy import canonical_skill_key, normalize_skill_text, extract_canonical_skills
 
 
 _MONTHS = {
@@ -181,6 +181,99 @@ def _career_progression(experiences: list[WorkExperience]) -> str:
     return "Mixed seniority across listed roles."
 
 
+# ============================================================================
+# Years-required-aware experience_score (Batch 6)
+#
+# Extracted so BOTH the "has work_experience" path (below) and the "no
+# work_experience" path (evaluate_experience's early return) score
+# experience_score the same way. Previously, a candidate with zero listed
+# work_experience was hard-coded to experience_score=0.0 regardless of
+# years_required, which unfairly zeroed out entry-level candidates applying
+# to roles that explicitly require 0-1 years -- a candidate who happened to
+# have even one (irrelevant) work_experience row would fall through to this
+# exact logic and score 0.7, while a candidate with none at all got 0.0.
+# ============================================================================
+
+def _experience_score_for_years(years_relevant: float, years_required: int) -> float:
+    if years_required <= 0:
+        if years_relevant >= 1:
+            return 1.0
+        elif years_relevant > 0:
+            return 0.85
+        else:
+            return 0.7
+    return round(min(1.0, years_relevant / years_required), 2)
+
+
+# ============================================================================
+# Project relevance (Batch 6)
+#
+# resume_data.projects is a flat list[str] (e.g. "Flood Severity Prediction
+# -- built an ML model to predict flood risk using Python and scikit-learn"),
+# not a structured object like WorkExperience -- so this reuses the same
+# taxonomy-driven skill matching (extract_canonical_skills) and token-overlap
+# approach (_tokens/_overlap) as job_relevance() above, adapted for plain
+# text instead of a WorkExperience's separate title/technologies/
+# responsibilities fields.
+#
+# IMPORTANT: this only ever feeds role_relevance/strengths. It is
+# deliberately never added to years_relevant/years_worked -- projects are
+# not professional work history and must not inflate experience_score.
+# ============================================================================
+
+_PROJECT_RELEVANCE_THRESHOLD = 0.3  # below this, treat as "not relevant" (no boost, no strength)
+
+
+def project_relevance(project_text: str, requirements: JobRequirements) -> float:
+    """How relevant a single project description is to the target role."""
+    if not project_text:
+        return 0.0
+
+    jd_skill_keys = {
+        canonical_skill_key(s)
+        for s in (requirements.required_skills + requirements.preferred_skills)
+        if s
+    }
+    jd_topic_tokens = _tokens(requirements.title) | _tokens(" ".join(requirements.responsibilities[:8]))
+
+    proj_hits = {canonical_skill_key(name) for name, _category in extract_canonical_skills(project_text)}
+    matched = len(proj_hits & jd_skill_keys)
+    # Cap the denominator at 3 rather than dividing by the FULL required+
+    # preferred list (which can be 7-8+ items): a short project blurb that
+    # clearly names 2-3 of the JD's core skills is meaningfully relevant on
+    # its own merits and shouldn't be diluted just because the JD also has
+    # several other, unrelated preferred skills (e.g. "Git", "SQL") the
+    # blurb had no occasion to mention.
+    skill_hit = min(1.0, matched / 3) if jd_skill_keys else 0.0
+
+    topic_overlap = _overlap(_tokens(project_text), jd_topic_tokens)
+
+    relevance = 0.75 * min(1.0, skill_hit) + 0.25 * topic_overlap
+    return round(min(1.0, max(0.0, relevance)), 2)
+
+
+def _best_project(projects: list[str], requirements: JobRequirements) -> tuple[float, str | None]:
+    """Highest-relevance project and its score, or (0.0, None) if none clear the threshold."""
+    best_score = 0.0
+    best_project: str | None = None
+    for project_text in projects or []:
+        score = project_relevance(project_text, requirements)
+        if score > best_score:
+            best_score, best_project = score, project_text
+    if best_score < _PROJECT_RELEVANCE_THRESHOLD:
+        return 0.0, None
+    return best_score, best_project
+
+
+def _project_title(project_text: str, max_len: int = 60) -> str:
+    """Best-effort short label for a project blurb, for use in strengths."""
+    for sep in (" -- ", " — ", ": "):
+        if sep in project_text:
+            return project_text.split(sep, 1)[0].strip()
+    text = project_text.strip()
+    return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "\u2026"
+
+
 def evaluate_experience(
     resume_data: ResumeData, requirements: JobRequirements
 ) -> ExperienceEvaluation:
@@ -197,24 +290,62 @@ def evaluate_experience(
             )
             for edu in resume_data.education
         ) if resume_data.education else False
+
+        # Projects are a secondary relevance signal for candidates with no
+        # formal work history -- but they NEVER count as years of
+        # professional experience (years_relevant stays 0.0 below).
+        project_score, best_project = _best_project(resume_data.projects, requirements)
+        relevant_project = best_project is not None
+
+        role_relevance = round(max(
+            0.15 if has_relevant_education else 0.0,
+            project_score,
+        ), 2)
+
+        strengths = []
+        if has_relevant_education:
+            strengths.append("Relevant academic background")
+        if relevant_project:
+            strengths.append(f"Relevant project: {_project_title(best_project)}")
+
+        # Reuse the same years-required-aware scoring the "has work
+        # experience" path below uses, instead of hard-coding 0.0 -- a
+        # candidate with zero years relevant against a 0-1-year-required
+        # role should not score worse than one who has some irrelevant
+        # experience.
+        experience_score = _experience_score_for_years(0.0, years_required)
+
+        gaps = ["No work experience listed"]
+        if years_required > 0:
+            gaps.append(f"No professional experience found (role requires {years_required}y)")
+
+        reasoning_parts = [
+            f"No formal work experience was listed. Against a "
+            f"{years_required}-year requirement, experience_score is "
+            f"{experience_score:.2f} using the same years-required scale "
+            f"applied to candidates who do have work history."
+        ]
+        if relevant_project:
+            reasoning_parts.append(
+                f"Role relevance is boosted by a relevant project "
+                f"(\"{_project_title(best_project)}\"), which is not "
+                f"counted as professional experience."
+            )
+        elif has_relevant_education:
+            reasoning_parts.append("Role relevance reflects a related academic background.")
+        else:
+            reasoning_parts.append("No directly relevant education or projects were found either.")
+
         return ExperienceEvaluation(
             years_relevant=0.0,
             years_required=years_required,
-            experience_score=0.0,
-            role_relevance=0.15 if has_relevant_education else 0.0,
+            experience_score=experience_score,
+            role_relevance=role_relevance,
             career_progression="No professional work history listed.",
-            gaps_identified=["No work experience listed"],
-            strengths=["Relevant academic background"] if has_relevant_education else [],
-            confidence=0.95,
-            reasoning=(
-                "No work experience was listed on the resume, so experience_score "
-                "is set to 0 by rule rather than by LLM judgment. "
-                + (
-                    "Role relevance reflects a related academic background."
-                    if has_relevant_education
-                    else "No directly relevant education was found either."
-                )
-            ),
+            gaps_identified=gaps,
+            strengths=strengths,
+            confidence=0.9,
+            reasoning=" ".join(reasoning_parts),
         )
 
     per_job: list[tuple[float, float]] = []
@@ -240,15 +371,7 @@ def evaluate_experience(
     else:
         role_relevance = 0.0
 
-    if years_required <= 0:
-        if years_relevant >= 1:
-            experience_score = 1.0
-        elif years_relevant > 0:
-            experience_score = 0.85
-        else:
-            experience_score = 0.7
-    else:
-        experience_score = round(min(1.0, years_relevant / years_required), 2)
+    experience_score = _experience_score_for_years(years_relevant, years_required)
 
     if years_relevant + 0.25 < years_required:
         gaps.append(

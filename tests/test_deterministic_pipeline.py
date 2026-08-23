@@ -189,12 +189,16 @@ def test_skills_matcher_js_javascript():
 
 
 def test_experience_empty_history_rule():
+    """Batch 6: candidates with no work_experience against a 0-years-required
+    role are no longer hard-floored to experience_score=0.0 -- see
+    _experience_score_for_years / test_batch6_experience_projects.py for the
+    full regression coverage of this change."""
     data = ResumeData(
         education=[{"degree": "BS", "field": "Computer Science", "institution": "X"}]
     )
     reqs = JobRequirements(title="Associate AI Engineer", min_years_experience=0)
     ev = evaluate_experience(data, reqs)
-    assert ev.experience_score == 0.0
+    assert ev.experience_score == 0.7
     assert ev.role_relevance == 0.15
     assert ev.years_relevant == 0.0
 
