@@ -56,3 +56,6 @@ sample_data/resumes/resume_06_ayesha_naeem.pdf
 
 # SQLite database
 *.db
+
+# Generated resume files
+storage/resumes/
