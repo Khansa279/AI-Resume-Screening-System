@@ -405,6 +405,37 @@ def reset_screening_for_rerun(db: Session, screening_id: int) -> None:
     db.flush()
 
 
+def invalidate_completed_screening(db: Session, screening_id: int) -> None:
+    """Force ONE completed screening back to a re-runnable state, for
+    demo/dev tooling that intentionally wants to re-screen a resume
+    against a JD it was already (possibly staleily) screened against --
+    e.g. after an agent/scoring change like Batch 6, where
+    get_completed_screening_for_resume_and_jd would otherwise keep
+    returning the old cached result forever.
+
+    This does NOT touch scoring, matching, or the schema -- it only:
+      1. Deletes this screening's own child rows (SkillMatchResult,
+         ExperienceEvaluation, ScreeningResult, Explanation) via the
+         existing reset_screening_for_rerun cleanup.
+      2. Resets status back to "pending" and clears started_at/
+         completed_at, so get_completed_screening_for_resume_and_jd no
+         longer short-circuits screen_candidate() for this pair.
+
+    Scope is exactly one screening_id -- the Resume row, the
+    JobDescription row, every OTHER Screening, and any Ranking are all
+    left untouched. Safe to call on a non-completed screening too (it's
+    then just a no-op status-wise, same as reset_screening_for_rerun
+    alone would be).
+    """
+    reset_screening_for_rerun(db, screening_id)
+    screening = db.get(models.Screening, screening_id)
+    if screening is not None:
+        screening.status = "pending"
+        screening.started_at = None
+        screening.completed_at = None
+    db.flush()
+
+
 def save_skill_match_result(
     db: Session,
     screening_id: int,

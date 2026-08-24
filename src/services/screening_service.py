@@ -435,6 +435,23 @@ async def screen_candidate(
         explanation = _build_explanation(skills_match, experience_eval, final_output)
         repo.save_explanation(db, screening.id, **explanation)
 
+    # `screening` may have been loaded earlier in this same function call
+    # (via get_or_create_screening -> get_screening_for_resume_and_jd,
+    # which eager-loads .result/.explanation/.experience_evaluation) at a
+    # point when those relationships were genuinely empty -- e.g. a
+    # reused Screening row that had just been invalidated/reset (see
+    # repository.reset_screening_for_rerun / invalidate_completed_screening)
+    # and is being repopulated in this very call. The save_* calls above
+    # insert new child rows by screening_id directly; they don't update
+    # this already-loaded Python object's relationship attributes, so
+    # without this, the caller would read back stale (empty/None)
+    # relationships despite the real rows already being flushed. Expiring
+    # forces the next attribute access to re-read from the DB within the
+    # same transaction, seeing the rows just flushed above. This is a
+    # session-freshness fix only -- it does not change what gets
+    # computed or persisted.
+    db.expire(screening)
+
     return screening
 
 
