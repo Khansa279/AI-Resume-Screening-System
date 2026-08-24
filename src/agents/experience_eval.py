@@ -13,7 +13,12 @@ from typing import Any
 
 from .base import BaseAgent
 from ..models import ResumeData, JobRequirements, ExperienceEvaluation, WorkExperience
-from ..skill_taxonomy import canonical_skill_key, normalize_skill_text, extract_canonical_skills
+from ..skill_taxonomy import (
+    canonical_skill_key,
+    normalize_skill_text,
+    extract_canonical_skills,
+    normalize_requirement_skills,
+)
 
 
 _MONTHS = {
@@ -30,6 +35,28 @@ _STOP = frozenset({
     "with", "as", "by", "from", "engineer", "engineering", "developer",
     "software", "associate", "junior", "senior", "lead", "intern",
 })
+
+# Title-only stopwords: grammatical filler ONLY. Role/seniority words
+# ("engineer", "developer", "software", "senior", ...) are intentionally
+# NOT stripped here, unlike _STOP above. Titles are short -- stripping
+# those words from a title routinely leaves nothing behind (e.g. "Senior
+# Software Engineer" -> {} after the old _STOP), which forced
+# title_score to 0 via _overlap()'s empty-set short-circuit for almost
+# any conventional job title. Confirmed against real resumes: John Doe's
+# "Senior Software Engineer" produced an EMPTY token set under the old
+# _STOP list. Role words carry real signal for title comparison (two
+# "Engineer" titles overlapping is meaningful), so they stay.
+_TITLE_STOP = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "at", "to", "for", "on",
+    "with", "as", "by", "from",
+})
+
+
+def _title_tokens(text: str) -> set[str]:
+    return {
+        t for t in normalize_skill_text(text).split()
+        if t and t not in _TITLE_STOP and len(t) > 1
+    }
 
 _SENIORITY = [
     ("intern", 0), ("trainee", 0), ("junior", 1), ("associate", 1),
@@ -127,14 +154,21 @@ def _overlap(a: set[str], b: set[str]) -> float:
 
 
 def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
-    jd_title = _tokens(requirements.title)
-    jd_skills = {canonical_skill_key(s) for s in (requirements.required_skills + requirements.preferred_skills)}
-    jd_skills |= _tokens(" ".join(requirements.required_skills + requirements.preferred_skills))
+    jd_title = _title_tokens(requirements.title)
+
+    # Decompose each requirement (which may be a long descriptive phrase
+    # like "REST API development (Django REST Framework or FastAPI)")
+    # into the canonical skill keys it actually references, rather than
+    # treating the whole phrase as one opaque token. See
+    # skill_taxonomy.normalize_requirement_skills for why.
+    jd_skills: set[str] = set()
+    for s in requirements.required_skills + requirements.preferred_skills:
+        jd_skills |= normalize_requirement_skills(s)
+
     resp_text = " ".join(requirements.responsibilities[:8])
     jd_resp = _tokens(resp_text)
 
-    job_title = _tokens(exp.title)
-    job_tech = {canonical_skill_key(t) for t in exp.technologies} | _tokens(" ".join(exp.technologies))
+    job_title = _title_tokens(exp.title)
     job_resp = _tokens(" ".join(exp.responsibilities[:8]))
 
     title_score = _overlap(job_title, jd_title | jd_resp | _tokens(" ".join(requirements.required_skills)))
@@ -143,15 +177,18 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     if jd_skills:
         hits = sum(1 for k in tech_keys if k in jd_skills or any(k in s or s in k for s in jd_skills if s))
         skill_hit = min(1.0, hits / max(1, len(jd_skills))) if tech_keys else 0.0
-        # Also count responsibility mentions of required skills
-        resp_blob = canonical_skill_key(" ".join(exp.responsibilities))
+        # Also count responsibility mentions of required skills -- using
+        # the same decomposition, so a candidate whose bullets mention
+        # "Django" gets credit against a requirement phrased as "REST API
+        # development (Django REST Framework or FastAPI)" instead of
+        # needing that whole sentence to appear verbatim.
         text_blob = normalize_skill_text(
             " ".join([exp.title, " ".join(exp.technologies), " ".join(exp.responsibilities)])
         )
         mentioned = 0
         for req in requirements.required_skills:
-            key = canonical_skill_key(req)
-            if key and key in text_blob:
+            req_keys = normalize_requirement_skills(req)
+            if any(k and k in text_blob for k in req_keys):
                 mentioned += 1
         if requirements.required_skills:
             skill_hit = max(skill_hit, mentioned / len(requirements.required_skills))

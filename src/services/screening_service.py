@@ -191,7 +191,7 @@ def _build_explanation(skills_match, experience_eval, final_output) -> dict:
     ]
     skill_gaps = [
         m.requirement for m in skills_match.matches
-        if not m.matched
+        if not m.matched and m.soft_skill_status != "not_mentioned"
     ]
 
     confidence_label = (

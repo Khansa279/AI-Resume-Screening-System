@@ -11,6 +11,7 @@ from typing import Any
 
 from .base import BaseAgent
 from ..models import ResumeData, ContactInfo, Education, WorkExperience
+from ..skill_taxonomy import extract_canonical_skills
 
 
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
@@ -199,6 +200,24 @@ def _parse_education(text: str) -> list[Education]:
     return education
 
 
+def _technologies_for_job(title: str, bullets: list[str]) -> list[str]:
+    """Deterministically recognize technologies/tools/technical concepts
+    mentioned in one job's title + responsibility bullets, via the shared
+    skill taxonomy.
+
+    Previously WorkExperience.technologies was always hardcoded to [],
+    which meant ExperienceEvaluatorAgent.job_relevance()'s skill_hit
+    component (40% of role_relevance) never had anything to compare
+    against and silently contributed ~0 for every candidate. Soft skills
+    are excluded here (Leadership, Teamwork, ...) since a "technologies"
+    list should stay technologies -- those still get captured separately
+    by SkillExtractorAgent from the same bullet text.
+    """
+    text = " ".join([title or "", " ".join(bullets)])
+    hits = extract_canonical_skills(text)
+    return [name for name, category in hits if category != "soft_skill"]
+
+
 def _parse_experience(text: str) -> list[WorkExperience]:
     if not text:
         return []
@@ -255,7 +274,7 @@ def _parse_experience(text: str) -> list[WorkExperience]:
                 start_date=start_date,
                 end_date=end_date,
                 responsibilities=bullets,
-                technologies=[],
+                technologies=_technologies_for_job(title, bullets),
             ))
             i = j
             continue

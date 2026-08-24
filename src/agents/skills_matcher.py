@@ -15,7 +15,7 @@ from typing import Any
 
 from .base import BaseAgent
 from ..models import Skill, JobRequirements, SkillMatch, SkillsMatchResult
-from ..skill_taxonomy import canonical_skill_key, extract_canonical_skills
+from ..skill_taxonomy import canonical_skill_key, extract_canonical_skills, requirement_is_pure_soft_skill
 
 
 class SkillsMatcherAgent(BaseAgent):
@@ -98,9 +98,21 @@ class SkillsMatcherAgent(BaseAgent):
         required_met = 0
         preferred_met = 0
 
+        required_excluded = 0
+        preferred_excluded = 0
+
         for req in requirements.required_skills or []:
             match = self._score_requirement(req, skills)
             matches.append(match)
+            # A pure soft-skill requirement with no resume evidence either
+            # way is NOT a gap -- absence of a keyword like "communication"
+            # doesn't mean the candidate lacks it, so it must not reduce
+            # the score or count against required_skills_total. It still
+            # appears in `matches` (soft_skill_status="not_mentioned") for
+            # transparency; it's just excluded from scoring.
+            if match.soft_skill_status == "not_mentioned":
+                required_excluded += 1
+                continue
             required_scores.append(self.CREDIT_BY_QUALITY[match.match_quality])
             if match.matched:
                 required_met += 1
@@ -108,12 +120,15 @@ class SkillsMatcherAgent(BaseAgent):
         for req in requirements.preferred_skills or []:
             match = self._score_requirement(req, skills)
             matches.append(match)
+            if match.soft_skill_status == "not_mentioned":
+                preferred_excluded += 1
+                continue
             preferred_scores.append(self.CREDIT_BY_QUALITY[match.match_quality])
             if match.matched:
                 preferred_met += 1
 
-        required_total = len(requirements.required_skills or [])
-        preferred_total = len(requirements.preferred_skills or [])
+        required_total = len(requirements.required_skills or []) - required_excluded
+        preferred_total = len(requirements.preferred_skills or []) - preferred_excluded
 
         required_avg = sum(required_scores) / required_total if required_total else 1.0
         preferred_avg = sum(preferred_scores) / preferred_total if preferred_total else 1.0
@@ -130,7 +145,8 @@ class SkillsMatcherAgent(BaseAgent):
         overall_score = round(min(max(overall_score, 0.0), 1.0), 4)
 
         reasoning = self._build_reasoning(
-            required_met, required_total, preferred_met, preferred_total, overall_score
+            required_met, required_total, preferred_met, preferred_total, overall_score,
+            required_excluded, preferred_excluded,
         )
 
         # Deterministic matching applied identically every time -> stable,
@@ -152,6 +168,14 @@ class SkillsMatcherAgent(BaseAgent):
         """Score a single JD requirement string against the candidate's skill list."""
         req_canonical_key = canonical_skill_key(requirement)
         req_key = requirement.strip().lower()
+        is_soft = requirement_is_pure_soft_skill(requirement)
+
+        def _matched(match_quality: str, matched_skill: str, confidence: float, notes: str) -> SkillMatch:
+            return SkillMatch(
+                requirement=requirement, matched=True, matched_skill=matched_skill,
+                match_quality=match_quality, confidence=confidence, notes=notes,
+                soft_skill_status="demonstrated" if is_soft else None,
+            )
 
         # 1. Exact match: requirement string equals a candidate skill name
         #    (case-insensitive), OR both normalize to the same canonical
@@ -160,53 +184,62 @@ class SkillsMatcherAgent(BaseAgent):
         for skill in skills:
             skill_key = skill.name.strip().lower()
             if skill_key == req_key:
-                return SkillMatch(
-                    requirement=requirement, matched=True, matched_skill=skill.name,
-                    match_quality="exact", confidence=1.0,
-                    notes="Exact name match",
-                )
+                return _matched("exact", skill.name, 1.0, "Exact name match")
             if canonical_skill_key(skill.name) == req_canonical_key:
-                return SkillMatch(
-                    requirement=requirement, matched=True, matched_skill=skill.name,
-                    match_quality="exact", confidence=1.0,
-                    notes=f"Both normalize to '{req_canonical_key}'",
-                )
+                return _matched("exact", skill.name, 1.0, f"Both normalize to '{req_canonical_key}'")
 
         # 2. Semantic (alias) match: the requirement text contains a
         #    taxonomy alias whose canonical form matches a candidate skill,
         #    or vice-versa (candidate skill alias appears in requirement).
+        #    For soft skills, this is also where an INFERRED candidate
+        #    skill (e.g. "Leadership" inferred from "mentored junior devs")
+        #    counts as demonstrated evidence -- SkillExtractorAgent already
+        #    gives inferred skills lower confidence (0.7) than explicit
+        #    ones (0.95); we surface that provenance in the note here
+        #    rather than silently treating inferred and explicit the same.
         req_skill_hits = {name for name, _category in extract_canonical_skills(requirement)}
         for skill in skills:
             canonical_hits = extract_canonical_skills(skill.name)
             canonical_name = canonical_hits[0][0] if canonical_hits else skill.name
             if canonical_name in req_skill_hits:
-                return SkillMatch(
-                    requirement=requirement, matched=True, matched_skill=skill.name,
-                    match_quality="semantic", confidence=0.9,
-                    notes=f"Taxonomy alias match on '{canonical_name}'",
-                )
+                note = f"Taxonomy alias match on '{canonical_name}'"
+                if is_soft and skill.source == "inferred":
+                    note += " (inferred from resume experience, not explicitly listed)"
+                return _matched("semantic", skill.name, 0.9, note)
 
         # 3. Partial match: substring overlap either direction (e.g.
         #    requirement "Python programming experience" vs skill "Python").
         for skill in skills:
             skill_key = skill.name.strip().lower()
             if len(skill_key) >= 3 and (skill_key in req_key or req_key in skill_key):
-                return SkillMatch(
-                    requirement=requirement, matched=True, matched_skill=skill.name,
-                    match_quality="partial", confidence=0.5,
-                    notes="Substring overlap",
-                )
+                return _matched("partial", skill.name, 0.5, "Substring overlap")
 
-        # 4. No match
+        # 4. No match found in the candidate's extracted skills.
+        #
+        #    For a PURE soft-skill requirement, this means "not mentioned",
+        #    NOT "candidate lacks this trait" -- resumes routinely
+        #    demonstrate teamwork/communication/leadership without ever
+        #    using those exact words, and there is no reliable way to
+        #    prove a true negative from resume text. So this is flagged
+        #    "not_mentioned" (excluded from scoring/gaps by the caller)
+        #    rather than treated as an ordinary unmet requirement.
+        #
+        #    For a technical requirement, "no match" IS a real gap, same
+        #    as before -- that behavior is unchanged.
         return SkillMatch(
             requirement=requirement, matched=False, matched_skill="",
             match_quality="none", confidence=0.9,
-            notes="No matching candidate skill found",
+            notes=(
+                "No explicit or inferred evidence of this soft skill in the resume"
+                if is_soft else "No matching candidate skill found"
+            ),
+            soft_skill_status="not_mentioned" if is_soft else None,
         )
 
     def _build_reasoning(
         self, required_met: int, required_total: int,
         preferred_met: int, preferred_total: int, overall_score: float,
+        required_excluded: int = 0, preferred_excluded: int = 0,
     ) -> str:
         parts = [f"Overall skills match: {overall_score:.0%}."]
         if required_total:
@@ -215,4 +248,11 @@ class SkillsMatcherAgent(BaseAgent):
             parts.append("No required skills were specified for this role.")
         if preferred_total:
             parts.append(f"Met {preferred_met}/{preferred_total} preferred skills.")
+        excluded = required_excluded + preferred_excluded
+        if excluded:
+            parts.append(
+                f"{excluded} soft-skill requirement(s) (e.g. communication, teamwork) had no "
+                f"explicit or inferred evidence in the resume; not counted as gaps or scored "
+                f"against, since absence of a keyword doesn't confirm absence of the trait."
+            )
         return " ".join(parts)

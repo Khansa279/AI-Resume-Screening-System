@@ -100,6 +100,21 @@ class SkillMatch(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
     notes: str = ""
 
+    # Only populated when `requirement` is a PURE soft-skill requirement
+    # (e.g. "Good communication skills", "Strong teamwork") -- None for
+    # ordinary technical/mixed requirements, whose scoring is unaffected.
+    #   - "demonstrated": resume evidence found (explicit or inferred)
+    #   - "not_mentioned": no evidence either way. This must NOT be
+    #     treated as a gap or reduce the score -- absence of a keyword is
+    #     not proof of absence of the trait.
+    #   - "explicitly_missing": reserved for a future evidence source that
+    #     can actually assert absence (e.g. a structured reference check).
+    #     The deterministic resume-text matcher never assigns this on its
+    #     own, since it has no reliable way to detect a true negative from
+    #     resume text alone -- claiming it could would be fabricating a
+    #     distinction the data doesn't support.
+    soft_skill_status: Optional[Literal["demonstrated", "not_mentioned", "explicitly_missing"]] = None
+
 
 class SkillsMatchResult(BaseModel):
     """Overall skills matching result."""

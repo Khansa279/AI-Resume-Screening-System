@@ -379,7 +379,18 @@ class SkillMatchResult(Base):
 
 
 class SkillMatch(Base):
-    """Mirrors src/models.py::SkillMatch -- one requirement's match detail."""
+    """Mirrors src/models.py::SkillMatch -- one requirement's match detail.
+
+    NOTE: this is a SEPARATE class from src/models.py::SkillMatch (the
+    transient Pydantic model agents pass around in memory). They must be
+    kept in sync by hand -- repository.save_skill_match_result() does
+    `models.SkillMatch(**pydantic_match.model_dump())`, so any field added
+    to the Pydantic model has to be added here too, or that call raises
+    "<field> is an invalid keyword argument for SkillMatch" the next time
+    a screening actually gets persisted (agent-level/unit tests that
+    construct src/models.py::SkillMatch directly, like Batch 7, never
+    exercise this path and won't catch a drift like that).
+    """
 
     __tablename__ = "skill_matches"
 
@@ -393,6 +404,10 @@ class SkillMatch(Base):
     match_quality = Column(String, default="none")  # exact | semantic | partial | none
     confidence = Column(Float, default=0.0)
     notes = Column(Text, default="")
+    # demonstrated | not_mentioned | explicitly_missing | NULL (NULL/None
+    # for ordinary technical requirements that aren't pure soft skills --
+    # see src/models.py::SkillMatch for the full field semantics).
+    soft_skill_status = Column(String, nullable=True)
 
     skill_match_result = relationship("SkillMatchResult", back_populates="matches")
 

@@ -273,3 +273,42 @@ def extract_canonical_skills(text: str) -> list[tuple[str, str]]:
         if pattern.search(haystack):
             found.setdefault(canonical, category)
     return sorted(found.items(), key=lambda item: item[0].casefold())
+
+
+def normalize_requirement_skills(requirement: str) -> set[str]:
+    """Decompose a JD requirement string into the set of canonical taxonomy
+    skill keys it references.
+
+    JobAnalyzerAgent often returns long, descriptive requirement phrases
+    (e.g. "REST API development (Django REST Framework or FastAPI)" or
+    "Message queues (Redis, RabbitMQ, Celery)") rather than bare skill
+    tokens. Treating a whole such phrase as one opaque comparison key (as
+    canonical_skill_key() does when nothing in the taxonomy matches the
+    FULL string) means it can never line up with a candidate's individual
+    skills. This instead scans the phrase for every taxonomy skill it
+    references and returns their canonical keys individually, e.g.
+    {"django", "fast api", "rest apis"}.
+
+    Falls back to the requirement's own normalized text (single-item set)
+    when nothing in the taxonomy is recognized at all, so an unrecognized
+    requirement isn't silently discarded -- it just behaves as it did
+    before (an opaque phrase key that can still exact-match verbatim).
+    """
+    hits = extract_canonical_skills(requirement)
+    if hits:
+        return {normalize_skill_text(name) for name, _category in hits}
+    return {normalize_skill_text(requirement)}
+
+
+def requirement_is_pure_soft_skill(requirement: str) -> bool:
+    """True when EVERY taxonomy skill referenced by this requirement string
+    is a soft_skill (e.g. "Good communication skills in English", "Strong
+    teamwork and collaboration"). False for unrecognized text or for any
+    requirement that references at least one non-soft-skill concept, so a
+    mixed requirement like "Communication skills and Python" is still
+    treated as an ordinary (scored) requirement rather than being exempted.
+    """
+    hits = extract_canonical_skills(requirement)
+    if not hits:
+        return False
+    return all(category == "soft_skill" for _name, category in hits)

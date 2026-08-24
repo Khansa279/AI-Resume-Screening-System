@@ -450,7 +450,7 @@ def save_skill_match_result(
     matches: list[dict] | None = None,
 ) -> models.SkillMatchResult:
     """`matches` items: {"requirement", "matched", "matched_skill",
-    "match_quality", "confidence", "notes"}"""
+    "match_quality", "confidence", "notes", "soft_skill_status"}"""
     result = models.SkillMatchResult(
         screening_id=screening_id,
         required_skills_met=required_skills_met,
