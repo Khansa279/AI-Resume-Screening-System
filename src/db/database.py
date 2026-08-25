@@ -69,6 +69,7 @@ def _apply_lightweight_column_migrations() -> None:
     # (table_name, column_name, column_ddl_type)
     pending_columns = [
         ("resumes", "content_hash", "VARCHAR"),
+        ("skill_matches", "soft_skill_status", "TEXT"),
     ]
 
     with engine.connect() as conn:
