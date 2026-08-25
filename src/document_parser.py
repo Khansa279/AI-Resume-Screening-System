@@ -31,6 +31,75 @@ _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _PRIVATE_USE_PATTERN = re.compile(r"[\uE000-\uF8FF]")
 _ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
+# Line-leading bullet/list marker glyphs to normalize to "- " before any
+# other sanitization runs. Deliberately anchored to the START of a line
+# (optional leading whitespace only) and requires the marker to be
+# followed by real content -- this is what keeps the normalization
+# CONTEXTUAL: a hyphen, en dash, or arrow appearing inside a sentence,
+# date, or range (e.g. "January 2022 - Present", "Jan 2022 - Dec 2023",
+# "Q1 -> Q2", "co-founder") is never touched, because it isn't the first
+# character on its line.
+#
+# Three buckets, chosen to cover "regardless of which bullet glyph or PDF
+# font encoding was used" without guessing at every possible glyph:
+#   1. Control characters (\x00-\x08, \x0b, \x0c, \x0e-\x1f, \x7f) -- PDF
+#      icon fonts commonly render a bullet glyph as one of these when the
+#      font has no real Unicode mapping for it. This is the confirmed
+#      \x7f case (Priya Sharma, Rahul Verma, Ananya Patel, Vikram Singh's
+#      resume PDFs), generalized to the whole control-char range instead
+#      of hardcoding \x7f alone, since a different PDF export/font could
+#      just as easily emit \x02 or \x0e for the same visual bullet.
+#   2. Private Use Area characters (U+E000-U+F8FF) -- the other common
+#      home for icon-font glyphs (Wingdings-style bullet fonts).
+#   3. A curated set of standard Unicode bullet/list-marker symbols that
+#      legitimately show up in resume PDFs: bullet, white bullet, small
+#      black square, small triangle, triangular bullet, black circle,
+#      black/white square, arrowhead bullets, middle dot, bullet
+#      operator.
+#   4. Plain "*" -- already recognized by ResumeParserAgent, included
+#      here too only so it normalizes to the same canonical "- " marker.
+#
+# "-" itself is deliberately NOT in this set: it's already handled
+# correctly downstream (ResumeParserAgent._parse_experience already
+# recognizes a line-leading "-"), so leaving it alone avoids ANY risk of
+# this new layer reinterpreting a line that happens to start with a
+# hyphen (e.g. a standalone "- 2022" continuation fragment) differently
+# than before. Em dash, en dash, and arrows are also deliberately
+# excluded from the marker set for the same reason: those are common
+# INSIDE dates/ranges, and only the confirmed, unambiguous bullet-glyph
+# buckets above are normalized.
+_BULLET_MARKER_LINE_PATTERN = re.compile(
+    r"(?m)^([ \t]*)(?:"
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+    r"|[\uE000-\uF8FF]"
+    r"|[\u2022\u25E6\u25AA\u25B8\u2023\u25CF\u25A0\u25A1\u27A4\u27A2\u00B7\u2219]"
+    r"|\*"
+    r")[ \t]*(?=\S)"
+)
+
+
+def normalize_bullet_markers(text: str) -> str:
+    """Normalize line-leading bullet/list markers to the single canonical
+    form ("- ") that ResumeParserAgent._parse_experience already
+    recognizes, regardless of which bullet glyph or PDF font encoding
+    produced them.
+
+    Must run BEFORE _CONTROL_CHAR_PATTERN/_PRIVATE_USE_PATTERN strip
+    those same characters to empty/space -- otherwise the one signal
+    that distinguishes "this line is a bullet" from "this line is a new
+    job title" is destroyed before this function ever sees it, which is
+    exactly the bug this normalization fixes (a bullet glyph like \\x7f
+    being deleted outright, leaving a bare line with no marker at all).
+
+    Only touches the FIRST non-whitespace token of a line, and only when
+    it's one of the specific bullet-glyph buckets in
+    _BULLET_MARKER_LINE_PATTERN -- never touches punctuation appearing
+    later in a line (dates, ranges, hyphenated words, arrows in prose).
+    """
+    if not text:
+        return text
+    return _BULLET_MARKER_LINE_PATTERN.sub(r"\1- ", text)
+
 
 def normalize_extracted_text(text: str) -> str:
     """Collapse trivial whitespace so the same resume is hashed the same way
@@ -145,13 +214,24 @@ class DocumentParser:
                 error_message=f"Error parsing file: {str(e)}",
                 confidence=0.0
             )
+
+
     @staticmethod
     def _sanitize_extracted_text(text: str) -> str:
         """Remove extraction artifacts (control bytes, icon-font glyphs,
         zero-width chars) that were never legible text -- doesn't touch
-        real words or wording."""
+        real words or wording.
+
+        normalize_bullet_markers() runs FIRST, before the control-char /
+        private-use stripping below, so a bullet glyph rendered as a
+        control character or PUA icon-font character (see its docstring)
+        gets converted to "- " while it's still recognizable as a
+        line-leading marker, instead of being silently deleted by the
+        steps that follow.
+        """
         if not text:
             return text
+        text = normalize_bullet_markers(text)
         text = _CONTROL_CHAR_PATTERN.sub("", text)
         text = _PRIVATE_USE_PATTERN.sub(" ", text)
         text = _ZERO_WIDTH_PATTERN.sub("", text)

@@ -171,7 +171,21 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     job_title = _title_tokens(exp.title)
     job_resp = _tokens(" ".join(exp.responsibilities[:8]))
 
-    title_score = _overlap(job_title, jd_title | jd_resp | _tokens(" ".join(requirements.required_skills)))
+    # title_score measures TITLE similarity specifically, so it must be
+    # compared against the JD's own title tokens only. Previously this
+    # was Jaccard-overlapped against jd_title | jd_resp | required_skills
+    # text -- a ~60+ token union of the JD's entire responsibilities and
+    # required-skills vocabulary. Since Jaccard is |intersection|/|union|,
+    # unioning in that much unrelated vocabulary makes the denominator
+    # balloon regardless of how well the title itself matches: even a
+    # byte-for-byte identical title against "Backend Engineer - Python"
+    # scored ~0.05 instead of 1.0, because the union pulled in dozens of
+    # responsibility/skill words the short title could never intersect.
+    # Comparing job_title directly to jd_title (still Jaccard, still the
+    # existing _title_tokens/_overlap helpers -- no new similarity
+    # machinery) fixes the scale without touching what "title match"
+    # conceptually means.
+    title_score = _overlap(job_title, jd_title)
     tech_keys = {canonical_skill_key(t) for t in exp.technologies if t}
     skill_hit = 0.0
     if jd_skills:
