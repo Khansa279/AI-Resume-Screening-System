@@ -294,7 +294,7 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     job_title = _title_tokens(exp.title)
     job_resp = _tokens(" ".join(exp.responsibilities[:8]))
 
-    title_score = _overlap(job_title, jd_title | jd_resp | _tokens(" ".join(requirements.required_skills)))
+    title_score = _overlap(job_title, jd_title)
 
     # Deterministic role-family backstop: lexical overlap alone can't see
     # that e.g. "Senior Software Engineer" is plausibly (not fully)
