@@ -70,6 +70,7 @@ def _apply_lightweight_column_migrations() -> None:
     pending_columns = [
         ("resumes", "content_hash", "VARCHAR"),
         ("skill_matches", "soft_skill_status", "TEXT"),
+        ("screenings", "algorithm_version", "TEXT"),
     ]
 
     with engine.connect() as conn:

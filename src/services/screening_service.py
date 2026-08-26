@@ -43,6 +43,39 @@ from ..agents.job_analyzer import JobAnalyzerAgent
 RESUME_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "storage" / "resumes"
 
 
+# Bump this string whenever a change lands that can alter a candidate's
+# SCORE for the SAME resume+JD pair -- e.g. SkillsMatcherAgent's matching
+# rules, ExperienceEvaluatorAgent's role-relevance/years scoring,
+# DecisionSynthesizerAgent's weighting formula, or the shared skill
+# taxonomy (src/skill_taxonomy.py). A short human-readable tag (rather
+# than a bare integer) is deliberate: it shows up in logs/diagnostics and
+# makes it obvious at a glance which pipeline era produced a given
+# Screening row.
+#
+# WHY THIS EXISTS: screen_candidate()'s content-hash-based reuse (see
+# get_resume_by_content_hash / get_completed_screening_for_resume_and_jd)
+# only proves the RESUME TEXT for a (resume, JD) pair hasn't changed --
+# it says nothing about whether the SCORING CODE that evaluated it is
+# still the code that would score it today. Without this, a completed
+# Screening cached before a scoring bugfix (e.g. the role-relevance /
+# soft-skill fixes in Batches 7-10) would keep being served forever as
+# "the" result for that resume+JD pair, silently out of step with every
+# OTHER candidate scored under the fixed code -- the exact staleness
+# test_real_data.py surfaced.
+#
+# Every completed Screening is stamped with the version active when it
+# was scored (repository.save_screening_result). screen_candidate() below
+# only takes the 0-LLM-call reuse path when the stamped version matches
+# this constant; otherwise it invalidates just that one Screening
+# (repository.invalidate_completed_screening -- the same targeted,
+# single-row mechanism demo_screening.py's "re-screen" mode already uses)
+# and re-runs it through the current pipeline, reusing the same row
+# rather than creating a duplicate. This never touches any OTHER
+# candidate's Screening, the Resume row, the JobDescription, or any
+# Ranking.
+CURRENT_ALGORITHM_VERSION = "2026-08-role-relevance-batch10"
+
+
 # ============================================================================
 # Job requirements: parse once per JD version, reuse for every candidate
 # ============================================================================
@@ -277,13 +310,30 @@ async def screen_candidate(
             db, existing_resume.id, jd.id
         )
         if existing_screening is not None:
-            print(
-                f"screen_candidate: resume content already screened "
-                f"(resume_id={existing_resume.id}, content_hash={content_hash[:12]}..., "
-                f"screening_id={existing_screening.id}) -- reusing stored result, "
-                f"0 LLM calls."
-            )
-            return existing_screening
+            if existing_screening.algorithm_version == CURRENT_ALGORITHM_VERSION:
+                print(
+                    f"screen_candidate: resume content already screened "
+                    f"(resume_id={existing_resume.id}, content_hash={content_hash[:12]}..., "
+                    f"screening_id={existing_screening.id}, "
+                    f"algorithm_version={CURRENT_ALGORITHM_VERSION!r}) -- reusing stored "
+                    f"result, 0 LLM calls."
+                )
+                return existing_screening
+            else:
+                # Cached under an older (or unstamped/pre-migration, i.e.
+                # None) scoring pipeline -- not safe to serve as-is.
+                # Invalidate just this one Screening row (its child rows
+                # only; resume/JD/other candidates/rankings untouched)
+                # and fall through to re-run it for real below.
+                print(
+                    f"screen_candidate: found a completed screening "
+                    f"(screening_id={existing_screening.id}, resume_id={existing_resume.id}) "
+                    f"but it was scored under algorithm_version="
+                    f"{existing_screening.algorithm_version!r}, not the current "
+                    f"{CURRENT_ALGORITHM_VERSION!r} -- invalidating and re-scoring with "
+                    f"the current pipeline instead of reusing a stale result."
+                )
+                repo.invalidate_completed_screening(db, existing_screening.id)
 
     jr_row = await ensure_job_requirements(db, jd.id)
     job_requirements_dict = _job_requirements_to_dict(jr_row)
@@ -429,6 +479,7 @@ async def screen_candidate(
         confidence=final_output.confidence,
         reasoning_summary=final_output.reasoning_summary,
         flags=final_output.flags,
+        algorithm_version=CURRENT_ALGORITHM_VERSION,
     )
 
     if skills_match and experience_eval:

@@ -330,6 +330,18 @@ class Screening(Base):
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+    # Stamped with services.screening_service.CURRENT_ALGORITHM_VERSION
+    # when a ScreeningResult is saved (see repository.save_screening_result).
+    # NULL for any row completed before this column existed, or for a
+    # not-yet-completed screening. Content-hash-based resume reuse only
+    # proves the RESUME TEXT is unchanged for a (resume, JD) pair -- it
+    # says nothing about whether the SCORING CODE that evaluated it is
+    # still the code that would score it today. This is what lets
+    # screen_candidate() tell "safe to reuse, 0 LLM calls" apart from
+    # "was scored under an older, since-fixed pipeline version -- must
+    # be re-run" instead of serving a stale result forever. See
+    # services/screening_service.py's CURRENT_ALGORITHM_VERSION docstring.
+    algorithm_version = Column(String, nullable=True)
 
     resume = relationship("Resume", back_populates="screenings")
     job_description = relationship("JobDescription", back_populates="screenings")

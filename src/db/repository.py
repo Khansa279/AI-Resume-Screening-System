@@ -512,7 +512,15 @@ def save_screening_result(
     confidence: float,
     reasoning_summary: str,
     flags: list[str] | None = None,
+    algorithm_version: str | None = None,
 ) -> models.ScreeningResult:
+    """`algorithm_version` should be
+    services.screening_service.CURRENT_ALGORITHM_VERSION -- stamped onto
+    the Screening row so a later screen_candidate() call can tell this
+    result apart from one produced by an older, since-fixed scoring
+    pipeline. Left as an optional kwarg (default None) so existing
+    direct callers (seed_demo.py, tests) that don't care about staleness
+    detection keep working unchanged."""
     result = models.ScreeningResult(
         screening_id=screening_id,
         match_score=match_score,
@@ -529,6 +537,7 @@ def save_screening_result(
     if screening:
         screening.status = "completed"
         screening.completed_at = _now()
+        screening.algorithm_version = algorithm_version
 
     return result
 
