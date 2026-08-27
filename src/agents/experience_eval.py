@@ -359,6 +359,59 @@ def _experience_score_for_years(years_relevant: float, years_required: int) -> f
     return round(min(1.0, years_relevant / years_required), 2)
 
 
+# --------------------------------------------------------------------------
+# years_relevant per-job credit
+#
+# CONFIRMED BUG (Priority 6 investigation): the original formula was a flat
+#     credit = 0.35 + 0.65 * rel
+# applied to EVERY job regardless of how low `rel` (job_relevance()) was.
+# There was no lower gate at all -- a job scored at rel=0.01 (e.g. a
+# Frontend Developer role against a Backend JD) or rel=0.00 (a resume-
+# parsing artifact like a mis-split "EDUCATION & TRAINING" line being
+# treated as a job -- see the separate resume-parsing note in
+# src/agents/resume_parser.py) still received at least 35% credit toward
+# years_relevant, no different from a job that was genuinely, if weakly,
+# related. This is what produced the reported anomalies: Ananya Patel's
+# 4-year, 1%-relevant Frontend Developer role alone contributed ~1.45
+# "relevant" years (35% of 4.07), and Vikram Singh's unrelated Mechanical
+# Engineer role plus several parsing-artifact pseudo-jobs (career break,
+# education section header, university line) each got a guaranteed floor
+# of credit purely for having *some* duration, inflating years_relevant
+# well beyond what role_relevance (7%/33% respectively) would suggest is
+# defensible.
+#
+# The 0.35 floor itself was not baseless: job_relevance() is a lexical/
+# taxonomy approximation (see the Batch 8/9/10 history in this file) that
+# can under-score genuinely related work, so SOME hedge against
+# under-scoring is reasonable for a job that shows real, if weak,
+# relevance signal. The bug was applying that hedge unconditionally, even
+# to jobs with essentially no relevance signal at all.
+#
+# Fix: _years_relevant_credit() below only applies the 0.35+0.65*rel
+# hedge to jobs at/above _YEARS_RELEVANT_FLOOR_THRESHOLD (chosen to match
+# the rel < 0.2 cutoff this module already uses, a few lines below in
+# evaluate_experience(), to flag a job as "Limited relevance" -- a job
+# already flagged that way should not simultaneously receive a guaranteed
+# 35% credit toward years_relevant). Below that threshold, credit ramps
+# linearly from 0 at rel=0 up to the existing floor-formula's value AT
+# the threshold, so the curve is continuous (no cliff at the boundary)
+# and a genuinely irrelevant job (rel near 0) now contributes years near
+# 0, while the existing above-threshold behavior for real matches is
+# completely unchanged.
+# --------------------------------------------------------------------------
+_YEARS_RELEVANT_FLOOR_THRESHOLD = 0.2
+_YEARS_RELEVANT_FLOOR_CREDIT = 0.35
+
+
+def _years_relevant_credit(rel: float) -> float:
+    """Weight applied to a job's duration when accumulating years_relevant.
+    See the module-level comment above for the full rationale."""
+    threshold_credit = _YEARS_RELEVANT_FLOOR_CREDIT + (1 - _YEARS_RELEVANT_FLOOR_CREDIT) * _YEARS_RELEVANT_FLOOR_THRESHOLD
+    if rel < _YEARS_RELEVANT_FLOOR_THRESHOLD:
+        return threshold_credit * (rel / _YEARS_RELEVANT_FLOOR_THRESHOLD)
+    return _YEARS_RELEVANT_FLOOR_CREDIT + (1 - _YEARS_RELEVANT_FLOOR_CREDIT) * rel
+
+
 _PROJECT_RELEVANCE_THRESHOLD = 0.3
 
 
@@ -464,7 +517,7 @@ def evaluate_experience(resume_data: ResumeData, requirements: JobRequirements) 
         elif exp.title and rel < 0.2:
             gaps.append(f"Limited relevance: {exp.title} at {exp.company}")
 
-    years_relevant = round(sum(years * (0.35 + 0.65 * rel) for years, rel in per_job), 2)
+    years_relevant = round(sum(years * _years_relevant_credit(rel) for years, rel in per_job), 2)
     if per_job:
         role_relevance = round(
             sum(rel * max(years, 0.25) for years, rel in per_job) / sum(max(years, 0.25) for years, _rel in per_job), 2,

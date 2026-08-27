@@ -28,11 +28,12 @@ _HEADING_RE = re.compile(
     r"professional summary|summary|objective|profile|"
     r"work experience|professional experience|experience|employment|"
     r"internship experience|internships|"
-    r"education|academic background|"
+    r"education|academic background|education\s*(?:&|and)\s*training|"
     r"technical skills|skills|core competencies|core skills|"
     r"certifications|certificates|"
     r"projects|personal projects|"
-    r"awards|activities|languages"
+    r"awards|activities|languages|"
+    r"career break|career gap|employment gap|sabbatical"
     r")\s*:?\s*$",
     re.I,
 )
@@ -50,6 +51,8 @@ _SECTION_ALIASES = {
     "internships": "experience",
     "education": "education",
     "academic background": "education",
+    "education & training": "education",
+    "education and training": "education",
     "technical skills": "skills",
     "skills": "skills",
     "core competencies": "skills",
@@ -58,6 +61,19 @@ _SECTION_ALIASES = {
     "certificates": "certifications",
     "projects": "projects",
     "personal projects": "projects",
+    # Recognized so the heading itself (and everything under it) stops
+    # leaking into whichever section was previously active -- e.g.
+    # "CAREER BREAK" was previously unrecognized entirely, so its text
+    # kept accumulating into the still-open "experience" section and
+    # occasionally got misparsed by _parse_experience() as a fake job
+    # (see _parse_experience's title/company heuristic). There is no
+    # ResumeData field for this content, so it's intentionally routed to
+    # a section key ("career_break") that nothing downstream reads --
+    # dropped, not converted into a WorkExperience or Education entry.
+    "career break": "career_break",
+    "career gap": "career_break",
+    "employment gap": "career_break",
+    "sabbatical": "career_break",
 }
 
 _DEGREE_RE = re.compile(
@@ -71,6 +87,45 @@ _DATE_LINE_RE = re.compile(
     r"dec(?:ember)?|(?:19|20)\d{2}|present|current|summer)",
     re.I,
 )
+
+# Defense-in-depth guard for _parse_experience(): even with the heading
+# recognition above, a resume can still use SOME heading variant we
+# haven't enumerated (or omit a heading altogether around a short
+# paragraph), leaking education/training or career-break text into the
+# "experience" bucket that _parse_experience()'s title+company heuristic
+# then misreads as a fake job. These two checks catch that content at
+# the point a WorkExperience would otherwise be fabricated, without
+# touching the title/company/date parsing heuristic itself for anything
+# that doesn't match.
+#
+# Deliberately NOT reusing the bare _DEGREE_RE from education parsing
+# here: _DEGREE_RE includes short/ambiguous words ("associate", "b.e.")
+# that legitimately appear in real job titles ("Associate Software
+# Engineer"). This is a narrower pattern, and -- for "master" -- requires
+# "master of"/"master's" rather than the bare word, so a real "Scrum
+# Master" title is never affected.
+_EDUCATION_ENTRY_TITLE_RE = re.compile(
+    r"(bachelor|master\s+of|master'?s\b|ph\.?d\b|b\.?sc\b|m\.?sc\b|"
+    r"b\.?tech\b|m\.?tech\b|\bmba\b|diploma|bootcamp)",
+    re.I,
+)
+_INSTITUTION_NAME_RE = re.compile(
+    r"(university|college|institute|academy|polytechnic|bootcamp)",
+    re.I,
+)
+_NON_JOB_TITLE_RE = re.compile(
+    r"^(?:career break|career gap|employment gap|sabbatical)\b",
+    re.I,
+)
+
+
+def _looks_like_education_or_break_entry(title: str, company: str) -> bool:
+    """True when a would-be WorkExperience's title/company look like a
+    degree/training entry or a career-break note that leaked out of its
+    real section, rather than an actual job."""
+    if _NON_JOB_TITLE_RE.match(title.strip()):
+        return True
+    return bool(_EDUCATION_ENTRY_TITLE_RE.search(title) and _INSTITUTION_NAME_RE.search(company))
 
 
 def _split_sections(text: str) -> dict[str, str]:
@@ -266,7 +321,7 @@ def _parse_experience(text: str) -> list[WorkExperience]:
                 j += 1
                 continue
             break
-        if title and (company or bullets or _DATE_LINE_RE.search(duration)):
+        if title and (company or bullets or _DATE_LINE_RE.search(duration)) and not _looks_like_education_or_break_entry(title, company):
             jobs.append(WorkExperience(
                 title=title,
                 company=company or "Unknown",
