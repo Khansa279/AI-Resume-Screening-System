@@ -1,0 +1,18 @@
+.signal-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 20px;
+}
+
+.signal-bars__bar {
+  width: 3px;
+  border-radius: 1px;
+  background: var(--teal);
+  opacity: 0.55;
+}
+
+.signal-bars__bar:nth-child(2n) {
+  background: var(--indigo);
+  opacity: 0.45;
+}

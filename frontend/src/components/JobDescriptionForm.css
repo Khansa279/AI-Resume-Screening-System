@@ -32,7 +32,7 @@
   width: 100%;
   padding: 0.7rem 0.85rem;
   font-size: 0.95rem;
-  border-radius: 10px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface-1);
   color: var(--text-primary);
@@ -47,7 +47,7 @@
 }
 
 .jd-textarea-dropzone {
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface-1);
   padding: 0.25rem;

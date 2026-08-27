@@ -1,0 +1,33 @@
+.score-ring {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.score-ring__track {
+  stroke: var(--surface-3);
+}
+
+.score-ring__value {
+  stroke: var(--teal);
+  transition: stroke-dasharray 0.4s ease;
+}
+
+.score-ring--medium .score-ring__value {
+  stroke: var(--amber);
+}
+
+.score-ring--low .score-ring__value {
+  stroke: var(--rose);
+}
+
+.score-ring__label {
+  position: absolute;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--navy);
+}
