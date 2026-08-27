@@ -1,0 +1,101 @@
+.jd-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.field-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.field-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.field-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.text-input {
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.95rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.text-input:focus,
+.textarea-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.jd-textarea-dropzone {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  padding: 0.25rem;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.jd-textarea-dropzone--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.textarea-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 160px;
+  padding: 0.75rem 0.85rem;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+.jd-upload-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.35rem 0.6rem 0.5rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.2rem 0.3rem;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.jd-file-preview {
+  display: flex;
+}
