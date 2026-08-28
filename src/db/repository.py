@@ -671,6 +671,12 @@ def get_ranking_with_details(db: Session, ranking_id: int) -> Optional[models.Ra
             selectinload(models.Ranking.entries)
             .selectinload(models.RankingEntry.screening)
             .selectinload(models.Screening.explanation),
+            selectinload(models.Ranking.entries)
+            .selectinload(models.RankingEntry.screening)
+            .selectinload(models.Screening.skill_match_result),
+            selectinload(models.Ranking.entries)
+            .selectinload(models.RankingEntry.screening)
+            .selectinload(models.Screening.experience_evaluation),
         )
     )
     return db.scalar(stmt)

@@ -49,16 +49,16 @@ function BreakdownMeter({ label, value }) {
  *
  * `candidate` fields come straight from the FastAPI ScreeningResponse
  * (see src/api/schemas.py::ScreeningCandidateResult), mapped in
- * ResultsPreview. The current API only provides: rank (derived from
- * result order), name, matchScore, recommendation, requiresHuman,
- * confidence, and an optional per-candidate error.
+ * ResultsPreview::toCandidateCardProps. The API now provides: rank
+ * (derived from result order), name, matchScore, recommendation,
+ * requiresHuman, confidence, an optional per-candidate error, email,
+ * phone, a free-text explanation (why_summary), matched skills, skill
+ * gaps, and a skill/experience/role-relevance breakdown.
  *
- * It does NOT yet provide: email, phone, resume filename, matched
- * skills, skill gaps, a skills/experience/role-relevance breakdown, or a
- * free-text explanation. Rather than inventing placeholder values for
- * those, every such section is only rendered when the data is actually
- * present, so this component keeps working unchanged once the backend
- * adds them.
+ * Not every candidate necessarily has every field (e.g. a candidate with
+ * no email on file, or one whose screening predates these fields being
+ * persisted) -- each section below is still only rendered when its data
+ * is actually present, rather than inventing placeholder values.
  */
 function CandidateCard({ candidate }) {
   const [expanded, setExpanded] = useState(false)

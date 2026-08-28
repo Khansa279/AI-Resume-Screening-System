@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.db import init_db
+from src.services.screening_service import JobAnalysisFailedError
 
 from .routes import health, jobs, screening
 
@@ -87,6 +88,21 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=422,
             content={"error": "validation_error", "detail": exc.errors()},
+        )
+
+    @app.exception_handler(JobAnalysisFailedError)
+    async def job_analysis_failed_handler(request: Request, exc: JobAnalysisFailedError) -> JSONResponse:
+        # Distinct from a generic 500: this means the underlying LLM call
+        # to analyze the job description failed, so no candidate in this
+        # request was actually scored against real requirements. 502
+        # (Bad Gateway) signals "an upstream dependency failed", which is
+        # accurate here and lets the frontend show "JD analysis failed,
+        # please retry" instead of a normal-looking (but meaningless)
+        # ranking.
+        logger.warning("Job analysis failed: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"error": "job_analysis_failed", "detail": str(exc)},
         )
 
     @app.exception_handler(ValueError)

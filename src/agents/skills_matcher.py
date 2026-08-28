@@ -11,6 +11,7 @@ candidate skill satisfies a JD requirement, instead of asking an LLM to
 judge "semantic"/"partial" matches freshly on every run.
 """
 
+import re
 from typing import Any
 
 from .base import BaseAgent
@@ -207,12 +208,28 @@ class SkillsMatcherAgent(BaseAgent):
                     note += " (inferred from resume experience, not explicitly listed)"
                 return _matched("semantic", skill.name, 0.9, note)
 
-        # 3. Partial match: substring overlap either direction (e.g.
+        # 3. Partial match: WHOLE-WORD overlap either direction (e.g.
         #    requirement "Python programming experience" vs skill "Python").
+        #
+        #    This must be a word-boundary match, not a raw substring
+        #    check -- a naive `skill_key in req_key` treats "Java" as a
+        #    match for "JavaScript frontend framework experience" (Java
+        #    is a literal prefix of JavaScript), and likewise "SQL"
+        #    falsely matches "NoSQL", "Git" falsely matches "GitHub
+        #    Actions", and "Ruby" falsely matches "RubyGems". Each of
+        #    those pairs names a DIFFERENT technology and must not be
+        #    scored as even a partial match. Requiring \b...\b boundaries
+        #    on both sides keeps the legitimate case (a real word,
+        #    surrounded by spaces/punctuation/string edges) working while
+        #    rejecting a match that's really just a shared prefix/substring
+        #    of a longer, distinct word.
         for skill in skills:
             skill_key = skill.name.strip().lower()
-            if len(skill_key) >= 3 and (skill_key in req_key or req_key in skill_key):
-                return _matched("partial", skill.name, 0.5, "Substring overlap")
+            if len(skill_key) < 3:
+                continue
+            escaped = re.escape(skill_key)
+            if re.search(rf"\b{escaped}\b", req_key) or re.search(rf"\b{re.escape(req_key)}\b", skill_key):
+                return _matched("partial", skill.name, 0.5, "Whole-word overlap")
 
         # 4. No match found in the candidate's extracted skills.
         #

@@ -47,7 +47,28 @@ class JobAnalyzerAgent(BaseAgent):
         
         # Call LLM
         response = await self._call_llm_for_json_async(prompt)   # was: self._call_llm_async(prompt)
-        
+
+        # _call_llm_for_json_async returns "" specifically when the LLM
+        # API call never succeeded at all (rate limit exhausted, auth
+        # failure, network error, etc -- see BaseAgent's docstring) --
+        # as distinct from the call succeeding but returning malformed
+        # JSON (which _parse_response already degrades gracefully with
+        # parsing_confidence=0.3, a legitimate "the JD text itself was
+        # hard to parse" signal). Total API failure must be surfaced as
+        # an error, not silently turned into a JobRequirements row that
+        # looks like a normal (if low-confidence) analysis -- otherwise
+        # the caller (ensure_job_requirements) would cache this "empty
+        # analysis" forever as if it were the real JD, and every
+        # candidate would be scored against zero requirements without
+        # anyone -- including the recruiter looking at the frontend --
+        # ever finding out the JD was never actually analyzed.
+        if not response:
+            return {
+                "job_requirements": JobRequirements(parsing_confidence=0.0),
+                "errors": ["JobAnalyzerAgent: LLM API call failed -- job description was not analyzed"],
+                "agent_confidences": {self.name: 0.0},
+            }
+
         # Parse the response
         job_requirements = self._parse_response(response)
         

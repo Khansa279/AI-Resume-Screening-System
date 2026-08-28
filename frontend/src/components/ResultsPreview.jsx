@@ -4,12 +4,19 @@ import './ResultsPreview.css'
 
 /**
  * Maps one ScreeningCandidateResult (src/api/schemas.py) into the shape
- * CandidateCard expects. Only fields the API actually returns are used --
- * anything CandidateCard can't be given (email, phone, matched skills,
- * score breakdown, etc.) is left undefined so CandidateCard renders an
- * "unavailable" state for that piece instead of fabricated data.
+ * CandidateCard expects. As of the F-08 backend fix the API now returns
+ * contact info, matched skills / gaps, a skill/experience/role-relevance
+ * breakdown, and a free-text explanation -- all mapped through here.
+ * Anything still missing for a given candidate (e.g. no email on file)
+ * is left undefined so CandidateCard continues to render its existing
+ * "unavailable" fallback for that piece rather than fabricated data.
  */
 function toCandidateCardProps(result, index) {
+  const hasBreakdown =
+    result.skill_match_score != null ||
+    result.experience_score != null ||
+    result.role_relevance != null
+
   return {
     id: result.screening_id ?? `${result.resume_id}-${index}`,
     rank: index + 1,
@@ -19,6 +26,22 @@ function toCandidateCardProps(result, index) {
     requiresHuman: result.requires_human,
     confidence: result.confidence,
     error: result.error || null,
+    email: result.candidate_email || undefined,
+    phone: result.candidate_phone || undefined,
+    explanation: result.why_summary || undefined,
+    matchedSkills: result.matching_skills && result.matching_skills.length > 0
+      ? result.matching_skills
+      : undefined,
+    skillGaps: result.skill_gaps && result.skill_gaps.length > 0
+      ? result.skill_gaps
+      : undefined,
+    breakdown: hasBreakdown
+      ? {
+          skillMatch: result.skill_match_score ?? 0,
+          experience: result.experience_score ?? 0,
+          roleRelevance: result.role_relevance ?? 0,
+        }
+      : undefined,
   }
 }
 

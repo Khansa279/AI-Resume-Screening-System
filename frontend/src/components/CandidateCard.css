@@ -26,8 +26,9 @@
 
 .candidate-card__summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 1.1rem;
+  gap: 0.65rem 1.1rem;
   width: 100%;
   padding: 1rem 1.25rem;
   background: none;
@@ -53,7 +54,7 @@
   align-items: center;
   gap: 0.75rem;
   min-width: 0;
-  flex: 1 1 260px;
+  flex: 1 1 160px;
 }
 
 .candidate-card__avatar {
@@ -79,9 +80,14 @@
 }
 
 .candidate-card__name {
+  display: block;
   font-weight: 600;
   font-size: 0.98rem;
   color: var(--navy);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .candidate-card__explanation {
@@ -91,6 +97,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 32ch;
+}
+
+.candidate-card__status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 .recommendation-pill {
@@ -121,13 +135,6 @@
   border-color: rgba(168, 56, 76, 0.2);
 }
 
-.candidate-card__skills {
-  display: none;
-  align-items: center;
-  gap: 0.4rem;
-  flex-shrink: 0;
-}
-
 .skill-chip {
   font-size: 0.72rem;
   font-weight: 500;
@@ -137,6 +144,7 @@
   padding: 0.22rem 0.55rem;
   border-radius: 5px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .skill-chip--more {
@@ -220,6 +228,7 @@
 
 .candidate-card__chevron {
   flex-shrink: 0;
+  margin-left: auto;
   width: 26px;
   height: 26px;
   border-radius: 50%;
@@ -327,15 +336,8 @@
 
 /* ---- Responsive -------------------------------------------------- */
 
-@media (min-width: 860px) {
-  .candidate-card__skills {
-    display: flex;
-  }
-}
-
 @media (max-width: 720px) {
   .candidate-card__summary {
-    flex-wrap: wrap;
     row-gap: 0.75rem;
   }
 
@@ -353,11 +355,11 @@
     order: 0;
   }
 
-  .recommendation-pill {
+  .candidate-card__contacts {
     order: 2;
   }
 
-  .candidate-card__contacts {
+  .candidate-card__status {
     order: 3;
     margin-left: auto;
   }
