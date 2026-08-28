@@ -211,6 +211,11 @@
   color: var(--text-secondary);
 }
 
+.status-message--error {
+  color: var(--rose);
+  font-weight: 500;
+}
+
 .primary-button {
   padding: 0.7rem 1.6rem;
   font-size: 0.92rem;

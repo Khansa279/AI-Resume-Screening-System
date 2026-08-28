@@ -41,3 +41,34 @@
   flex-direction: column;
   gap: 0.75rem;
 }
+
+/* ---- Loading / error / empty states -------------------------------- */
+
+.results-preview__status {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-0);
+}
+
+.results-preview__status-text {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.results-preview__status--error {
+  border-color: rgba(168, 56, 76, 0.25);
+  background: var(--rose-soft);
+}
+
+.results-preview__status--error .results-preview__status-text {
+  color: var(--rose);
+}
+
+.results-preview__status--empty {
+  background: var(--surface-2);
+}

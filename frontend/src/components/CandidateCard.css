@@ -15,6 +15,15 @@
   box-shadow: 0 4px 18px rgba(16, 24, 43, 0.07);
 }
 
+.candidate-card--error {
+  border-color: rgba(168, 56, 76, 0.3);
+  background: var(--rose-soft);
+}
+
+.candidate-card--error .candidate-card__summary {
+  cursor: default;
+}
+
 .candidate-card__summary {
   display: flex;
   align-items: center;

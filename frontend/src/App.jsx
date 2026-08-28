@@ -3,6 +3,7 @@ import JobDescriptionForm from './components/JobDescriptionForm'
 import ResumeUploader from './components/ResumeUploader'
 import ResultsPreview from './components/ResultsPreview'
 import SignalBars from './components/SignalBars'
+import { createJob, runScreening } from './services/api'
 import './App.css'
 
 function App() {
@@ -11,6 +12,13 @@ function App() {
   const [jobDescriptionFile, setJobDescriptionFile] = useState(null)
   const [resumeFiles, setResumeFiles] = useState([])
   const [statusMessage, setStatusMessage] = useState(null)
+
+  // Screening workflow state -- driven entirely by real API calls, no
+  // mock data. See src/services/api.js for the endpoints this wires up.
+  const [results, setResults] = useState([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [screeningComplete, setScreeningComplete] = useState(false)
 
   const handleJobDescriptionFileChange = (file) => {
     setJobDescriptionFile(file)
@@ -28,18 +36,38 @@ function App() {
   }
 
   const hasJobDescription = Boolean(jobDescriptionText.trim() || jobDescriptionFile)
-  const canSubmit = jobTitle.trim() && hasJobDescription && resumeFiles.length > 0
+  const canSubmit =
+    jobTitle.trim() && hasJobDescription && resumeFiles.length > 0 && !isLoading
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault()
     if (!canSubmit) return
 
-    // Screening submission (API wiring for run/upload/results comes in a
-    // later chunk) -- this confirms the collected inputs are ready to
-    // send to the existing FastAPI endpoints in src/services/api.js.
-    setStatusMessage(
-      `Ready to screen ${resumeFiles.length} resume(s) for "${jobTitle.trim()}".`
-    )
+    setIsLoading(true)
+    setError(null)
+    setStatusMessage(`Screening ${resumeFiles.length} resume(s) for "${jobTitle.trim()}"...`)
+
+    try {
+      const job = await createJob({
+        title: jobTitle.trim(),
+        jdText: jobDescriptionFile ? null : jobDescriptionText,
+        jdFile: jobDescriptionFile,
+      })
+
+      const screeningResponse = await runScreening(job.position_id, resumeFiles)
+
+      setResults(screeningResponse.results || [])
+      setScreeningComplete(true)
+      setStatusMessage(
+        `Screened ${screeningResponse.candidates_screened} candidate(s) for "${jobTitle.trim()}".`
+      )
+    } catch (err) {
+      setError(err.message || 'Something went wrong while screening. Please try again.')
+      setStatusMessage(null)
+      setScreeningComplete(false)
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -110,14 +138,26 @@ function App() {
           </div>
 
           <div className="submit-row">
-            {statusMessage && <span className="status-message">{statusMessage}</span>}
-            <button type="submit" className="primary-button" disabled={!canSubmit}>
-              Screen Resumes
+            {error && <span className="status-message status-message--error">{error}</span>}
+            {!error && statusMessage && <span className="status-message">{statusMessage}</span>}
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={!canSubmit}
+              aria-busy={isLoading}
+            >
+              {isLoading ? 'Screening…' : 'Screen Resumes'}
             </button>
           </div>
         </form>
 
-        <ResultsPreview />
+        <ResultsPreview
+          jobTitle={jobTitle}
+          results={results}
+          isLoading={isLoading}
+          error={error}
+          screeningComplete={screeningComplete}
+        />
       </main>
 
       <footer className="site-footer">
@@ -125,7 +165,11 @@ function App() {
         <span className="site-footer__dot" aria-hidden="true">
           ·
         </span>
-        <span>Results shown above use placeholder data</span>
+        <span>
+          {screeningComplete
+            ? 'Results shown above are from your most recent screening run'
+            : 'Run a screening above to see ranked candidates'}
+        </span>
       </footer>
     </div>
   )
