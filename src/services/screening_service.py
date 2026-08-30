@@ -76,6 +76,25 @@ RESUME_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "storage" /
 CURRENT_ALGORITHM_VERSION = "2026-08-role-relevance-batch10"
 
 
+class JobAnalysisFailedError(RuntimeError):
+    """Raised when JobAnalyzerAgent's LLM call fails outright (F-07).
+
+    A total API failure (network error, auth failure, exhausted rate-limit
+    retries -- see BaseAgent._call_llm_for_json_async, which returns ""
+    for exactly this case) must never be persisted as if it were a real,
+    if low-confidence, JD analysis. Without this, ensure_job_requirements
+    would cache an empty JobRequirements row (parsing_confidence=0.0, no
+    skills) the FIRST time a JD version was ever screened, and every
+    subsequent candidate would be silently scored against zero
+    requirements forever, with no automatic way to recover and no error
+    surfaced anywhere the recruiter would see it.
+
+    Raising here instead lets the caller decide how to handle a failed
+    analysis (retry, surface a 5xx to the frontend, etc.) -- it is
+    deliberately NOT swallowed into a fabricated "successful" result.
+    """
+
+
 # ============================================================================
 # Job requirements: parse once per JD version, reuse for every candidate
 # ============================================================================
@@ -131,6 +150,16 @@ async def ensure_job_requirements(
     agent = JobAnalyzerAgent()
     result = await agent.process({"job_description": jd.raw_text})
     parsed: JobRequirementsModel = result["job_requirements"]
+
+    # F-07: a total LLM API failure (see JobAnalyzerAgent.process, which
+    # reports this via `errors` + parsing_confidence=0.0) must not be
+    # persisted as a cached JobRequirements row -- raise instead of
+    # silently caching an empty analysis forever.
+    if result.get("errors"):
+        raise JobAnalysisFailedError(
+            f"JobAnalyzerAgent failed to analyze job_description_id={job_description_id}: "
+            f"{'; '.join(result['errors'])}"
+        )
 
     return repo.save_job_requirements(
         db, job_description_id,

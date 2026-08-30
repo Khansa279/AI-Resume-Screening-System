@@ -37,6 +37,38 @@ router = APIRouter(tags=["screening"])
 _ALLOWED_RESUME_EXTS = {".pdf", ".docx", ".doc", ".txt"}
 
 
+def _safe_resume_filename(filename: str) -> str:
+    """Reduce a client-supplied upload filename to a safe basename that
+    can never escape the destination directory it's later joined onto.
+
+    F-01: `filename` comes straight from the multipart upload and is
+    fully untrusted. Joining it directly onto a server-side temp
+    directory (`tmp_dir / filename`) is a path-traversal vulnerability:
+    a relative name like "../../etc/cron.d/evil" walks out of the temp
+    directory, and an ABSOLUTE path like "/etc/passwd" is worse --
+    pathlib's `/` operator discards the left-hand side entirely when the
+    right-hand side is absolute, so `Path("/tmp/uploads") / "/etc/passwd"`
+    evaluates to `Path("/etc/passwd")`, silently overwriting an arbitrary
+    file outside the intended directory.
+
+    `Path(filename).name` strips any directory components (both POSIX
+    "/" and, via a manual backslash check below, Windows "\\" style
+    separators) and refuses to let the result be absolute, leaving only
+    the final path segment. Empty, ".", or ".." all collapse to that
+    same final segment being empty or a bare dot-string, which is
+    replaced with a generic "resume" fallback so callers always get a
+    non-empty, safe name back.
+    """
+    name = (filename or "").strip()
+    # Normalize Windows-style separators too, since Path() on a POSIX
+    # host does not treat backslash as a separator on its own.
+    name = name.replace("\\", "/")
+    name = Path(name).name  # drops any remaining directory components
+    if name in ("", ".", ".."):
+        return "resume"
+    return name
+
+
 def _require_position_with_jd(position_id: int) -> None:
     """Read-only validation reusing existing repository lookups -- raises
     the appropriate HTTP error instead of letting screen_position() fail
@@ -103,18 +135,19 @@ async def run_screening(position_id: int, resumes: list[UploadFile] = File(...))
         resume_paths: list[str] = []
         for upload in resumes:
             filename = upload.filename or "resume"
-            # SECURITY: `filename` is client-supplied and untrusted. Using
-            # it directly in `tmp_dir / filename` is a path-traversal
+            # SECURITY (F-01): `filename` is client-supplied and untrusted.
+            # Using it directly in `tmp_dir / filename` is a path-traversal
             # vulnerability -- a filename like "../../../etc/cron.d/x" or
             # an absolute path like "/etc/passwd" can write outside
             # tmp_dir entirely (pathlib's `/` operator drops the left
-            # side when the right side is absolute). Only the extension
-            # (already validated against the allow-list below) is taken
-            # from the untrusted name; the actual on-disk filename is
-            # always a fresh random one, the same pattern
+            # side when the right side is absolute). _safe_resume_filename
+            # reduces it to a safe basename before it's used for anything,
+            # including the extension check below. The actual on-disk
+            # filename is still a fresh random one, the same pattern
             # services/screening_service.py::_store_resume_file already
-            # uses for permanent storage.
-            ext = Path(filename).suffix.lower()
+            # uses for permanent storage -- belt and suspenders.
+            safe_filename = _safe_resume_filename(filename)
+            ext = Path(safe_filename).suffix.lower()
             if ext not in _ALLOWED_RESUME_EXTS:
                 raise HTTPException(
                     status_code=400,

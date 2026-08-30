@@ -31,24 +31,29 @@ from src.models import JobRequirements, Skill, WorkExperience
     ("/etc/passwd", "/etc/passwd"),
     ("..\\..\\windows\\system32\\evil.txt", ".."),
 ])
-def test_malicious_filenames_are_reduced_to_a_safe_basename(malicious_name, forbidden_fragment):
+def test_malicious_filenames_are_reduced_to_a_safe_basename(malicious_name, forbidden_fragment, tmp_path):
     safe = _safe_resume_filename(malicious_name)
     assert ".." not in safe
     assert "/" not in safe
     assert "\\" not in safe
     # Confirms joining it onto a directory can never leave that directory.
-    dest = Path("/tmp/some_upload_dir") / safe
-    assert Path("/tmp/some_upload_dir") in dest.resolve().parents or dest.resolve().parent == Path("/tmp/some_upload_dir")
+    # `tmp_path` (a pytest fixture) gives a real, platform-native
+    # directory -- a WindowsPath on Windows, a PosixPath elsewhere --
+    # so this containment check is meaningful on either OS instead of
+    # assuming POSIX-style "/tmp/..." paths.
+    dest = tmp_path / safe
+    assert dest.resolve().is_relative_to(tmp_path.resolve())
+    assert dest.resolve().parent == tmp_path.resolve()
 
 
-def test_absolute_path_filename_does_not_override_the_destination_directory():
+def test_absolute_path_filename_does_not_override_the_destination_directory(tmp_path):
     """The specific pathlib footgun: Path(a) / b returns just `b` if `b`
     is absolute. This must never be allowed to reach the final `/` join
     in the route."""
     safe = _safe_resume_filename("/etc/passwd")
-    dest = Path("/tmp/uploads") / safe
-    assert str(dest).startswith("/tmp/uploads/")
-    assert dest != Path("/etc/passwd")
+    dest = tmp_path / safe
+    assert dest.resolve().is_relative_to(tmp_path.resolve())
+    assert dest.resolve() != Path("/etc/passwd").resolve()
 
 
 def test_normal_filenames_are_preserved():
