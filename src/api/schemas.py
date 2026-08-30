@@ -53,31 +53,17 @@ class ScreeningCandidateResult(BaseModel):
     requires_human: bool
     confidence: float
     error: Optional[str] = None
-
-    # ---- Contact info (from Candidate) ---------------------------------
-    candidate_email: Optional[str] = None
-    candidate_phone: Optional[str] = None
-    candidate_location: Optional[str] = None
-
-    # ---- Explanation / "why" (from Explanation + ScreeningResult) ------
-    why_summary: Optional[str] = None
+    # Already computed and persisted by screening_service._build_explanation
+    # / repository.save_explanation -- previously never exposed over the
+    # API, even though frontend/src/components/CandidateCard.jsx already
+    # has UI for exactly these fields (matchedSkills, skillGaps,
+    # explanation) and silently renders its "unavailable" fallback state
+    # for all of them. No new computation here, just exposing existing data.
     matching_skills: list[str] = Field(default_factory=list)
     skill_gaps: list[str] = Field(default_factory=list)
-    confidence_label: Optional[str] = None
-    flags: list[str] = Field(default_factory=list)
-
-    # ---- Skill match breakdown (from SkillMatchResult) ------------------
-    skill_match_score: Optional[float] = None
-    required_skills_met: Optional[int] = None
-    required_skills_total: Optional[int] = None
-    preferred_skills_met: Optional[int] = None
-    preferred_skills_total: Optional[int] = None
-
-    # ---- Experience breakdown (from ExperienceEvaluation) ---------------
-    years_relevant: Optional[float] = None
-    years_required: Optional[int] = None
-    experience_score: Optional[float] = None
-    role_relevance: Optional[float] = None
+    explanation: Optional[str] = None
+    candidate_email: Optional[str] = None
+    candidate_phone: Optional[str] = None
 
 
 class ScreeningResponse(BaseModel):

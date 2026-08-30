@@ -208,28 +208,33 @@ class SkillsMatcherAgent(BaseAgent):
                     note += " (inferred from resume experience, not explicitly listed)"
                 return _matched("semantic", skill.name, 0.9, note)
 
-        # 3. Partial match: WHOLE-WORD overlap either direction (e.g.
-        #    requirement "Python programming experience" vs skill "Python").
-        #
-        #    This must be a word-boundary match, not a raw substring
-        #    check -- a naive `skill_key in req_key` treats "Java" as a
-        #    match for "JavaScript frontend framework experience" (Java
-        #    is a literal prefix of JavaScript), and likewise "SQL"
-        #    falsely matches "NoSQL", "Git" falsely matches "GitHub
-        #    Actions", and "Ruby" falsely matches "RubyGems". Each of
-        #    those pairs names a DIFFERENT technology and must not be
-        #    scored as even a partial match. Requiring \b...\b boundaries
-        #    on both sides keeps the legitimate case (a real word,
-        #    surrounded by spaces/punctuation/string edges) working while
-        #    rejecting a match that's really just a shared prefix/substring
-        #    of a longer, distinct word.
+        # 3. Partial match: WORD-BOUNDARY-aware substring overlap either
+        #    direction (e.g. requirement "Python programming experience"
+        #    vs skill "Python" -- "python" appears in the requirement as
+        #    a whole word). Plain (non-word-boundary) substring
+        #    containment previously matched unrelated skills that merely
+        #    share a prefix -- e.g. candidate skill "Java" incorrectly
+        #    satisfied requirement "JavaScript" (since "java" in
+        #    "javascript"), and "C++" incorrectly satisfied requirement
+        #    "C" (since "c" in "c++"), even though this project's own
+        #    taxonomy (skill_taxonomy.py) treats Java/JavaScript and C/C++
+        #    as distinct canonical skills. A word-boundary requirement on
+        #    whichever side is doing the "containing" fixes this while
+        #    leaving genuine substring matches (a whole word appearing
+        #    inside a longer phrase) unaffected. The boundary character
+        #    class additionally includes +/#/. -- the same punctuation
+        #    skill_taxonomy.py's own _PROTECT list already treats as part
+        #    of a single compound token (c++, c#, .net) -- so "c" doesn't
+        #    read as a standalone word at the start of "c++" either.
+        _BOUNDARY_CHARS = r"[a-z0-9+#.]"
         for skill in skills:
             skill_key = skill.name.strip().lower()
             if len(skill_key) < 3:
                 continue
-            escaped = re.escape(skill_key)
-            if re.search(rf"\b{escaped}\b", req_key) or re.search(rf"\b{re.escape(req_key)}\b", skill_key):
-                return _matched("partial", skill.name, 0.5, "Whole-word overlap")
+            if re.search(rf"(?<!{_BOUNDARY_CHARS})" + re.escape(skill_key) + rf"(?!{_BOUNDARY_CHARS})", req_key):
+                return _matched("partial", skill.name, 0.5, "Substring overlap")
+            if re.search(rf"(?<!{_BOUNDARY_CHARS})" + re.escape(req_key) + rf"(?!{_BOUNDARY_CHARS})", skill_key):
+                return _matched("partial", skill.name, 0.5, "Substring overlap")
 
         # 4. No match found in the candidate's extracted skills.
         #

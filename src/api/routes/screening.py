@@ -37,32 +37,6 @@ router = APIRouter(tags=["screening"])
 _ALLOWED_RESUME_EXTS = {".pdf", ".docx", ".doc", ".txt"}
 
 
-def _safe_resume_filename(original_name: str) -> str:
-    """Reduce a client-supplied upload filename to a safe basename that
-    can never escape the destination directory it's later joined onto.
-
-    `Path(original_name).name` strips every directory component --
-    leading slashes, "..", drive letters -- leaving only the final path
-    segment. Without this, `tmp_dir / original_name` is vulnerable to
-    path traversal (e.g. "../../etc/cron.d/evil") or, worse, complete
-    path replacement (pathlib's `/` operator treats an absolute
-    right-hand operand as replacing the left side entirely, so a
-    filename of "/etc/passwd" would resolve to "/etc/passwd" itself,
-    not "<tmp_dir>/etc/passwd").
-    """
-    # On this (POSIX) server, backslashes in a filename aren't path
-    # separators to the filesystem, so they can't actually be used to
-    # escape the destination directory -- but a filename authored on
-    # Windows could still contain them as a literal traversal attempt,
-    # so they're normalized to "/" first and PurePosixPath.name then
-    # strips them along with everything else.
-    normalized = (original_name or "resume").replace("\\", "/")
-    safe_name = Path(normalized).name.strip()
-    if not safe_name or safe_name in (".", ".."):
-        safe_name = "resume"
-    return safe_name
-
-
 def _require_position_with_jd(position_id: int) -> None:
     """Read-only validation reusing existing repository lookups -- raises
     the appropriate HTTP error instead of letting screen_position() fail
@@ -87,9 +61,6 @@ def _ranking_to_response(ranking: db_models.Ranking, position_id: int) -> Screen
         candidate = screening.resume.candidate if screening.resume else None
         result = screening.result
         explanation = screening.explanation
-        skill_match = screening.skill_match_result
-        experience = screening.experience_evaluation
-
         results.append(ScreeningCandidateResult(
             screening_id=screening.id,
             resume_id=screening.resume_id,
@@ -98,23 +69,11 @@ def _ranking_to_response(ranking: db_models.Ranking, position_id: int) -> Screen
             recommendation=result.recommendation,
             requires_human=result.requires_human,
             confidence=result.confidence,
-            candidate_email=(candidate.email if candidate else None) or None,
-            candidate_phone=(candidate.phone if candidate else None) or None,
-            candidate_location=(candidate.location if candidate else None) or None,
-            why_summary=result.reasoning_summary or None,
             matching_skills=list(explanation.matching_skills) if explanation else [],
             skill_gaps=list(explanation.skill_gaps) if explanation else [],
-            confidence_label=explanation.confidence_label if explanation else None,
-            flags=list(result.flags or []),
-            skill_match_score=skill_match.overall_score if skill_match else None,
-            required_skills_met=skill_match.required_skills_met if skill_match else None,
-            required_skills_total=skill_match.required_skills_total if skill_match else None,
-            preferred_skills_met=skill_match.preferred_skills_met if skill_match else None,
-            preferred_skills_total=skill_match.preferred_skills_total if skill_match else None,
-            years_relevant=experience.years_relevant if experience else None,
-            years_required=experience.years_required if experience else None,
-            experience_score=experience.experience_score if experience else None,
-            role_relevance=experience.role_relevance if experience else None,
+            explanation=explanation.why_summary if explanation else None,
+            candidate_email=(candidate.email if candidate and candidate.email else None),
+            candidate_phone=(candidate.phone if candidate and candidate.phone else None),
         ))
     return ScreeningResponse(
         position_id=position_id,
@@ -143,35 +102,27 @@ async def run_screening(position_id: int, resumes: list[UploadFile] = File(...))
     try:
         resume_paths: list[str] = []
         for upload in resumes:
-            # SECURITY: `upload.filename` is client-controlled and must
-            # never be joined onto a server path directly -- a filename
-            # like "../../etc/cron.d/evil" (path traversal) or
-            # "/etc/passwd" (pathlib treats an absolute right-hand side
-            # as replacing the left side entirely in `Path / Path`)
-            # would let an attacker write outside tmp_dir. Path(...).name
-            # strips ALL directory components (leading slashes, "..",
-            # drive letters) and keeps only the final path segment, so
-            # the write destination is always guaranteed to stay inside
-            # tmp_dir. A random prefix is added on top so two uploads
-            # that happen to share a basename can't collide/overwrite
-            # each other within the same request.
-            original_name = upload.filename or "resume"
-            safe_name = _safe_resume_filename(original_name)
-
-            ext = Path(safe_name).suffix.lower()
+            filename = upload.filename or "resume"
+            # SECURITY: `filename` is client-supplied and untrusted. Using
+            # it directly in `tmp_dir / filename` is a path-traversal
+            # vulnerability -- a filename like "../../../etc/cron.d/x" or
+            # an absolute path like "/etc/passwd" can write outside
+            # tmp_dir entirely (pathlib's `/` operator drops the left
+            # side when the right side is absolute). Only the extension
+            # (already validated against the allow-list below) is taken
+            # from the untrusted name; the actual on-disk filename is
+            # always a fresh random one, the same pattern
+            # services/screening_service.py::_store_resume_file already
+            # uses for permanent storage.
+            ext = Path(filename).suffix.lower()
             if ext not in _ALLOWED_RESUME_EXTS:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Unsupported resume file type for {original_name!r}: {ext or '(none)'}. "
+                    detail=f"Unsupported resume file type for {filename!r}: {ext or '(none)'}. "
                            f"Allowed: {sorted(_ALLOWED_RESUME_EXTS)}",
                 )
-
-            dest = tmp_dir / f"{uuid.uuid4().hex[:12]}_{safe_name}"
-            # Belt-and-suspenders: confirm the resolved destination is
-            # still actually inside tmp_dir before writing anything.
-            if tmp_dir.resolve() not in dest.resolve().parents:
-                raise HTTPException(status_code=400, detail=f"Invalid resume filename: {original_name!r}")
-
+            safe_name = f"upload_{uuid.uuid4().hex[:12]}{ext}"
+            dest = tmp_dir / safe_name
             content = await upload.read()
             dest.write_bytes(content)
             resume_paths.append(str(dest))

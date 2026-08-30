@@ -76,18 +76,32 @@ RESUME_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "storage" /
 CURRENT_ALGORITHM_VERSION = "2026-08-role-relevance-batch10"
 
 
-class JobAnalysisFailedError(RuntimeError):
-    """Raised when JobAnalyzerAgent's LLM call fails outright (as opposed
-    to succeeding but producing a low-confidence read of a genuinely
-    vague JD). Deliberately never caught/absorbed here -- callers (API
-    routes, scripts) should surface this as a clear failure rather than
-    quietly persisting an empty JobRequirements row that would then be
-    reused forever (see ensure_job_requirements)."""
-
-
 # ============================================================================
 # Job requirements: parse once per JD version, reuse for every candidate
 # ============================================================================
+
+def _job_requirements_row_is_usable(jr: db_models.JobRequirements) -> bool:
+    """False for a cached JobRequirements row that looks like it came
+    from a FAILED JobAnalyzerAgent run rather than a real parse of the
+    JD text -- e.g. the LLM API call errored, or its response couldn't
+    be parsed as JSON at all. JobAnalyzerAgent._parse_response() returns
+    parsing_confidence=0.3 specifically (and only) for those failure
+    cases (see src/agents/job_analyzer.py), as distinct from a
+    genuinely-parsed JD that the LLM itself just reported low confidence
+    in. Without this check, a single failed/rate-limited API call the
+    FIRST time a JD version was ever screened would permanently cache an
+    empty JobRequirements row -- ensure_job_requirements's existing-row
+    short-circuit would then serve that same empty result to every
+    subsequent candidate screened against this JD version forever, with
+    no automatic way to recover.
+
+    Both conditions (the specific failure-fallback confidence value AND
+    both skill lists empty) are required, so a real, thin, low-skill JD
+    that a human genuinely wrote sparsely is not mistaken for a failure
+    and endlessly re-parsed."""
+    has_skills = bool(jr.skills)
+    return not (jr.parsing_confidence == 0.3 and not has_skills)
+
 
 async def ensure_job_requirements(
     db: Session, job_description_id: int
@@ -95,10 +109,20 @@ async def ensure_job_requirements(
     """Return persisted JobRequirements for this JD version. Runs
     JobAnalyzerAgent only if they don't already exist -- this is what
     makes batch screening cheap: one LLM call per JD version, not one
-    per resume."""
+    per resume.
+
+    A cached row that looks like it came from a failed JobAnalyzerAgent
+    run (see _job_requirements_row_is_usable) is not reused -- it's
+    deleted and re-parsed instead, so a transient LLM failure on the
+    first screening against a JD version doesn't permanently poison
+    every later screening against it.
+    """
     existing = repo.get_job_requirements(db, job_description_id)
     if existing is not None:
-        return existing
+        if _job_requirements_row_is_usable(existing):
+            return existing
+        db.delete(existing)
+        db.flush()
 
     jd = repo.get_job_description(db, job_description_id)
     if jd is None:
@@ -107,22 +131,6 @@ async def ensure_job_requirements(
     agent = JobAnalyzerAgent()
     result = await agent.process({"job_description": jd.raw_text})
     parsed: JobRequirementsModel = result["job_requirements"]
-
-    # parsing_confidence == 0.0 is the specific, otherwise-unreachable
-    # sentinel JobAnalyzerAgent now returns ONLY when its LLM call failed
-    # outright (see job_analyzer.py) -- a real analysis of even a very
-    # vague JD still produces some non-zero confidence (0.3 minimum from
-    # the malformed-JSON fallback). Refusing to persist this means a
-    # transient API failure can be retried on the next screening attempt
-    # instead of being cached forever as "the" analysis for this JD
-    # version, silently starving every candidate's skill match against
-    # zero required/preferred skills.
-    if parsed.parsing_confidence <= 0.0:
-        raise JobAnalysisFailedError(
-            f"JobAnalyzerAgent failed to analyze job_description_id={job_description_id} "
-            f"(the LLM call did not succeed). Not caching this result -- retry once the "
-            f"underlying issue is resolved. errors={result.get('errors')}"
-        )
 
     return repo.save_job_requirements(
         db, job_description_id,

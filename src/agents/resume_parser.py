@@ -15,6 +15,64 @@ from ..skill_taxonomy import extract_canonical_skills
 
 
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+
+# Icon-heavy resume-builder templates (e.g. the "enhancv.com" template
+# used by resume_06_ayesha_naeem.pdf / resume_05_khansa_aslam.pdf) render
+# a contact icon's alt-text/tooltip label directly adjacent to the value
+# that follows it, with no separating whitespace. When the icon glyph
+# itself renders as a Unicode "symbol" character substituted mid-word
+# (e.g. the "o" in "envelope" becomes "\u2322"), the SURVIVING tail of
+# that label can end up fused directly onto the front of the real email
+# address with nothing to mark the boundary -- e.g. "...envel\u2322pe" +
+# "khansaaslam524@gmail.com" extracts as one token,
+# "pekhansaaslam524@gmail.com". Since \b-anchored regex matching has no
+# way to know where the real address starts in that fused token, this is
+# fixed as a post-match cleanup: known icon-label words for this class of
+# template, checked as a suffix-strip candidate ONLY when a Unicode
+# Symbol-category character (the actual glyph-substitution artifact) is
+# present immediately before the match -- so an ordinary email that
+# merely happens to start with the same two letters (e.g.
+# "pearson123@gmail.com") is never touched, since it has no such adjacent
+# symbol character.
+_ICON_LABEL_WORDS = ("envelope", "phone", "email", "mail", "github", "linkedin", "website", "location")
+_SYMBOL_CHAR_RE = re.compile(r"[^\x00-\x7F\w\s]")
+
+
+def _strip_icon_label_artifact(local_part: str) -> str:
+    """Strip a fused icon-label suffix from the front of an email's
+    local-part, preferring the longest matching suffix of any known
+    label word so a real username is never over-trimmed. Returns the
+    input unchanged if no known label suffix matches at the front."""
+    best = local_part
+    for label in _ICON_LABEL_WORDS:
+        for cut in range(len(label), 0, -1):
+            suffix = label[-cut:]
+            if local_part.lower().startswith(suffix) and len(local_part) > len(suffix):
+                candidate = local_part[len(suffix):]
+                if candidate and len(candidate) < len(best):
+                    best = candidate
+    return best
+
+
+def _clean_icon_glyph_email(raw_text: str, match: "re.Match[str]") -> str:
+    """Given a raw _EMAIL_RE match against `raw_text`, return the email
+    with any fused icon-label artifact removed -- only when a Unicode
+    symbol character (the actual glyph-substitution evidence) appears in
+    the several characters immediately before the match with no
+    whitespace in between. Otherwise returns the match unchanged."""
+    full = match.group(0)
+    start = match.start()
+    lookback = raw_text[max(0, start - 15):start]
+    # Only the tail of lookback up to the nearest whitespace matters --
+    # anything past a real space/newline is a different word entirely.
+    tail = re.split(r"\s", lookback)[-1]
+    if not _SYMBOL_CHAR_RE.search(tail):
+        return full
+    local_part, _, domain = full.partition("@")
+    cleaned_local = _strip_icon_label_artifact(local_part)
+    if cleaned_local == local_part:
+        return full
+    return f"{cleaned_local}@{domain}"
 _PHONE_RE = re.compile(
     r"(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]?\d{4}"
 )
@@ -146,7 +204,12 @@ def _split_sections(text: str) -> dict[str, str]:
 
 def _parse_contact(header: str, full_text: str) -> ContactInfo:
     blob = header or full_text[:800]
-    email = (_EMAIL_RE.search(full_text) or _EMAIL_RE.search(blob))
+    email_match = _EMAIL_RE.search(full_text)
+    email_source = full_text
+    if email_match is None:
+        email_match = _EMAIL_RE.search(blob)
+        email_source = blob
+    email_str = _clean_icon_glyph_email(email_source, email_match) if email_match else ""
     phone = _PHONE_RE.search(blob) or _PHONE_RE.search(full_text)
     linkedin = _LINKEDIN_RE.search(full_text)
     github = _GITHUB_RE.search(full_text)
@@ -179,7 +242,7 @@ def _parse_contact(header: str, full_text: str) -> ContactInfo:
 
     return ContactInfo(
         name=name,
-        email=email.group(0) if email else "",
+        email=email_str,
         phone=phone.group(0).strip() if phone else "",
         location=location,
         linkedin=linkedin.group(0) if linkedin else "",
@@ -233,6 +296,22 @@ def _parse_education(text: str) -> list[Education]:
             degree, field = left.strip(), right.strip()
         else:
             degree = first
+            # Some resumes format this line as "<Institution> - <Field>"
+            # rather than "<Degree> in <Field>" (e.g. "Air University -
+            # Data Science"). Without this, `field` stays empty purely
+            # because of wording, which then silently fails downstream
+            # education-relevance matching (experience_eval.py's
+            # has_relevant_education) for a candidate whose field is
+            # exactly as relevant as one phrased "Degree in Field" --
+            # e.g. two BS Data Science students getting different
+            # education-relevance credit purely from phrasing. Only
+            # applies when the text before the dash actually looks like
+            # an institution name, so an ordinary degree line like
+            # "BS Computer Science - 2024" (a year, not a field, on the
+            # right) is left untouched.
+            dash_m = re.match(r"^(.+?)\s*[-\u2013]\s*(.+)$", first)
+            if dash_m and re.search(r"university|college|institute|academy|polytechnic", dash_m.group(1), re.I):
+                field = dash_m.group(2).strip()
         institution = ""
         for line in lines[1:]:
             if "|" in line:
@@ -338,28 +417,98 @@ def _parse_experience(text: str) -> list[WorkExperience]:
 
 
 def _parse_list_section(text: str) -> list[str]:
+    """Split a list-style section (projects, certifications) into items.
+
+    Handles TWO distinct, both-common resume conventions, distinguished
+    by a small state machine rather than a fixed pattern:
+
+      1. "Flat bulleted list" -- the title line ITSELF is bullet-marked,
+         e.g.:
+             - Space Shooter Game
+             A space shooter game developed using...
+             - Arduino Based Heart Beat Monitor
+             ...
+         Each new bullet starts a new item; a following un-bulleted line
+         is that item's (single) continuation/description.
+
+      2. "Title, then bulleted sub-points" -- the title line is NOT
+         bullet-marked, and one or more bulleted lines underneath it are
+         its description, e.g.:
+             PBS DataFest 2025 -- Economic Trends Analysis
+             - Analyzed datasets to study economic trends in Pakistan.
+             - Created visualizations for GDP and employment data.
+             Data-Driven Insights into Lollywood (IMDb Dataset)
+             - Analyzed IMDb dataset using Python (Pandas, Matplotlib)
+             ...
+         Here a bullet CONTINUES the open (un-bulleted) item rather than
+         starting a new one; the next UN-bulleted line (after at least
+         one bullet has been seen) is what starts the next item.
+
+    Previously only convention 1 was handled -- convention 2 caused
+    every bullet under a title to be split into its own separate,
+    title-less item (and the title itself into a title-only item),
+    fragmenting one project into many. That fragmentation, in turn, was
+    what caused a downstream scoring bug: when a resume happens to use
+    convention 2 with bullets that a PDF extractor detaches from their
+    lines (see document_parser.py's extractor-selection fix), several
+    genuinely separate projects could get silently merged back into one
+    over-large blob instead of being recognized as the several distinct
+    items they are.
+    """
     if not text:
         return []
     items: list[str] = []
     current: list[str] = []
+    opened_with_bullet = False
+    received_bullet_since_open = False
+
+    def flush() -> None:
+        if current:
+            items.append(" ".join(current).strip())
+
     for line in text.split("\n"):
         stripped = line.strip()
         if not stripped:
-            if current:
-                items.append(" ".join(current).strip())
-                current = []
+            flush()
+            current.clear()
+            opened_with_bullet = False
+            received_bullet_since_open = False
             continue
-        if stripped.startswith(("-", "•", "*")):
-            if current:
-                items.append(" ".join(current).strip())
-            current = [stripped.lstrip("-•* ").strip()]
-        else:
-            if current:
-                current.append(stripped)
+
+        is_bullet = stripped.startswith(("-", "•", "*"))
+        content = stripped.lstrip("-•* ").strip() if is_bullet else stripped
+
+        if not current:
+            current = [content]
+            opened_with_bullet = is_bullet
+            received_bullet_since_open = is_bullet
+            continue
+
+        if is_bullet:
+            if opened_with_bullet:
+                # Convention 1: each bullet is a new item.
+                flush()
+                current = [content]
+                opened_with_bullet = True
+                received_bullet_since_open = True
             else:
-                current = [stripped]
-    if current:
-        items.append(" ".join(current).strip())
+                # Convention 2: bullet continues the open (un-bulleted)
+                # title item.
+                current.append(content)
+                received_bullet_since_open = True
+        else:
+            if (not opened_with_bullet) and received_bullet_since_open:
+                # We were inside convention 2's bulleted description
+                # block and a new un-bulleted line arrived -- that's the
+                # NEXT item's title.
+                flush()
+                current = [content]
+                opened_with_bullet = False
+                received_bullet_since_open = False
+            else:
+                current.append(content)
+
+    flush()
     return [i for i in items if i]
 
 

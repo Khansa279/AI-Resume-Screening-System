@@ -4,19 +4,17 @@ import './ResultsPreview.css'
 
 /**
  * Maps one ScreeningCandidateResult (src/api/schemas.py) into the shape
- * CandidateCard expects. As of the F-08 backend fix the API now returns
- * contact info, matched skills / gaps, a skill/experience/role-relevance
- * breakdown, and a free-text explanation -- all mapped through here.
- * Anything still missing for a given candidate (e.g. no email on file)
- * is left undefined so CandidateCard continues to render its existing
- * "unavailable" fallback for that piece rather than fabricated data.
+ * CandidateCard expects. The backend now also returns matching_skills,
+ * skill_gaps, explanation, candidate_email, and candidate_phone (see
+ * schemas.py::ScreeningCandidateResult) -- wired through here so
+ * CandidateCard's existing "matched skills" / "skill gaps" / "AI
+ * explanation" / contact-icon UI (previously always in its "unavailable"
+ * fallback state, since these fields never reached it) actually renders.
+ * Score breakdown (skillMatch/experience/roleRelevance) is still not
+ * returned by the API, so that section of CandidateCard continues to
+ * fall back gracefully.
  */
 function toCandidateCardProps(result, index) {
-  const hasBreakdown =
-    result.skill_match_score != null ||
-    result.experience_score != null ||
-    result.role_relevance != null
-
   return {
     id: result.screening_id ?? `${result.resume_id}-${index}`,
     rank: index + 1,
@@ -26,22 +24,11 @@ function toCandidateCardProps(result, index) {
     requiresHuman: result.requires_human,
     confidence: result.confidence,
     error: result.error || null,
-    email: result.candidate_email || undefined,
-    phone: result.candidate_phone || undefined,
-    explanation: result.why_summary || undefined,
-    matchedSkills: result.matching_skills && result.matching_skills.length > 0
-      ? result.matching_skills
-      : undefined,
-    skillGaps: result.skill_gaps && result.skill_gaps.length > 0
-      ? result.skill_gaps
-      : undefined,
-    breakdown: hasBreakdown
-      ? {
-          skillMatch: result.skill_match_score ?? 0,
-          experience: result.experience_score ?? 0,
-          roleRelevance: result.role_relevance ?? 0,
-        }
-      : undefined,
+    matchedSkills: result.matching_skills || [],
+    skillGaps: result.skill_gaps || [],
+    explanation: result.explanation || null,
+    email: result.candidate_email || null,
+    phone: result.candidate_phone || null,
   }
 }
 

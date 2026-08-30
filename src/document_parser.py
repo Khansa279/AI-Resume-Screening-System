@@ -237,6 +237,18 @@ class DocumentParser:
         text = _ZERO_WIDTH_PATTERN.sub("", text)
         return text
 
+    @staticmethod
+    def _count_bullet_lines(text: str) -> int:
+        """Count lines that are recognized bullet/list items AFTER
+        _sanitize_extracted_text has already run (so this counts the
+        canonical "- " marker normalize_bullet_markers() produces from
+        any of the bullet-glyph buckets it recognizes -- see that
+        function's docstring). This is a content-agnostic proxy for
+        "how much of this PDF's list structure survived extraction",
+        used only to compare two extractions of the SAME document
+        against each other -- never to judge a document in isolation."""
+        return sum(1 for line in text.split("\n") if line.strip().startswith("- "))
+
     def _parse_pdf(self, path: Path) -> ParseResult:
         if not PDF_AVAILABLE:
             return ParseResult(
@@ -249,11 +261,48 @@ class DocumentParser:
         pypdf2_text = self._sanitize_extracted_text(pypdf2_text)
         best_text, page_count = pypdf2_text, pypdf2_pages
 
-        if self._alpha_char_count(best_text) < self.MIN_MEANINGFUL_CHARS and PDFPLUMBER_AVAILABLE:
+        if PDFPLUMBER_AVAILABLE:
             plumber_text, plumber_pages, _ = self._extract_with_pdfplumber(path)
             plumber_text = self._sanitize_extracted_text(plumber_text)
-            if self._alpha_char_count(plumber_text) > self._alpha_char_count(best_text):
-                best_text, page_count = plumber_text, (plumber_pages or page_count)
+
+            if self._alpha_char_count(best_text) < self.MIN_MEANINGFUL_CHARS:
+                # Existing low-content fallback, unchanged: PyPDF2 got
+                # almost nothing usable at all -- take pdfplumber if it
+                # did meaningfully better on raw content.
+                if self._alpha_char_count(plumber_text) > self._alpha_char_count(best_text):
+                    best_text, page_count = plumber_text, (plumber_pages or page_count)
+            else:
+                # Both extractors produced substantial text. PyPDF2 and
+                # pdfplumber use different internal text-positioning
+                # strategies, so for some PDF templates one can silently
+                # detach a bullet/list-marker glyph from the line it
+                # belongs to while the other keeps it attached (see
+                # normalize_bullet_markers' docstring for why that
+                # matters downstream -- ResumeParserAgent/_parse_list_
+                # section rely on the marker surviving to know where one
+                # list item ends and the next begins; lose it and
+                # multiple distinct entries can get silently merged into
+                # one). Comparing recovered bullet-line counts is a
+                # general, content-agnostic quality signal for "which
+                # extraction preserved this document's list structure
+                # better" -- not a check tied to any specific resume.
+                # Verified against the existing sample_data/resumes/*.pdf
+                # corpus: for those files PyPDF2 recovers dramatically
+                # MORE bullets than pdfplumber (their bullets render as
+                # icon-font glyphs PyPDF2 happens to keep in place), so
+                # this rule correctly keeps PyPDF2 for them -- it only
+                # switches extractor when pdfplumber demonstrably
+                # recovers substantially more list structure without
+                # losing a large fraction of the extracted content.
+                pypdf2_bullets = self._count_bullet_lines(pypdf2_text)
+                plumber_bullets = self._count_bullet_lines(plumber_text)
+                plumber_alpha = self._alpha_char_count(plumber_text)
+                pypdf2_alpha = self._alpha_char_count(pypdf2_text)
+                if (
+                    plumber_bullets >= pypdf2_bullets + 2
+                    and plumber_alpha >= pypdf2_alpha * 0.7
+                ):
+                    best_text, page_count = plumber_text, (plumber_pages or page_count)
 
         if self._alpha_char_count(best_text) < self.MIN_MEANINGFUL_CHARS:
             tried = "PyPDF2" + (" and pdfplumber" if PDFPLUMBER_AVAILABLE else "")

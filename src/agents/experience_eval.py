@@ -214,28 +214,23 @@ def _parse_one_date(text: str) -> date | None:
         if re.search(rf"\b{name}\b", lowered):
             month = num
             break
-
-    # ISO-style "YYYY-MM" / "YYYY/MM" / "YYYY.MM" (optionally with a
-    # trailing "-DD"), e.g. "2023-06" or "2023-06-15". This is checked
-    # BEFORE the MM-first regex below because year-first ("2023-06") and
-    # month-first ("06-2023") are ambiguous to tell apart by shape alone
-    # once separators are stripped -- without this dedicated check,
-    # "2023-06" matched neither the month-name loop above (it's numeric)
-    # nor the MM/YYYY regex below (that regex requires the 1-2 digit
-    # group to come FIRST, but here the 4-digit year comes first), so
-    # `month` was silently left None and every such date collapsed to
-    # January of that year -- e.g. start="2023-06", end="2023-09" both
-    # resolved to 2023-01-01, giving a computed duration of 0 years for
-    # a real ~3-month role.
-    iso_ym = re.search(r"\b((?:19|20)\d{2})[/.\-](0?[1-9]|1[0-2])(?:[/.\-]\d{1,2})?\b", raw)
-    if iso_ym:
-        year = int(iso_ym.group(1))
-        month = int(iso_ym.group(2))
-
     mnum = re.search(r"\b(0?[1-9]|1[0-2])[/.-]((?:19|20)\d{2})\b", raw)
     if mnum:
         month = int(mnum.group(1))
         year = int(mnum.group(2))
+    else:
+        # ISO-style "YYYY-MM" (year first, month second) -- e.g. "2022-01",
+        # "2023-06". The MM-YYYY pattern above never matches this order,
+        # so previously any YYYY-MM date silently fell through with
+        # month=None and defaulted to January regardless of the real
+        # month -- correct only by coincidence when the real month
+        # happened to BE January. This is the same numeric date format
+        # WorkExperience.start_date/end_date use throughout this
+        # project's own sample data and tests (e.g. "2022-01", "2023-06").
+        ym = re.search(r"\b((?:19|20)\d{2})[/.-](0?[1-9]|1[0-2])\b", raw)
+        if ym:
+            year = int(ym.group(1))
+            month = int(ym.group(2))
     if year is None:
         return None
     return date(year, month or 1, 1)
