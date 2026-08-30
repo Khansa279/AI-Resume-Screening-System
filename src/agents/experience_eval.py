@@ -294,6 +294,39 @@ def _overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+# job_relevance()'s skill_hit component previously used a plain,
+# unbounded substring test (`k in s or s in k`, and separately `k in
+# text_blob`) to decide whether a candidate's technology/skill key
+# "relates to" a JD skill key. Both keys come from the same
+# skill_taxonomy normalization (canonical_skill_key /
+# normalize_requirement_skills / normalize_skill_text), which strips
+# punctuation down to single space-separated tokens -- so a plain
+# substring test has no way to tell "java" is a WHOLE word inside
+# "javascript" (false positive) apart from "algorithms" being a whole
+# word inside "data structures and algorithms" (a legitimate
+# multi-word/parent-child match the taxonomy already recognizes as
+# related). This produced exactly the same class of false-positive
+# bug already fixed in SkillsMatcherAgent (Java credited for
+# "JavaScript", C for "C++", Git for "GitHub", etc.) -- see
+# tests/test_job_relevance_skill_substring.py for reproductions.
+#
+# Fix: require the shorter key to appear at a WORD boundary within the
+# longer one (bounded by whitespace/start/end, since both sides are
+# already normalized to space-separated tokens with no other
+# punctuation) rather than anywhere as a raw substring. Exact-string
+# equality (k == s) is unaffected and still the primary path; this only
+# changes what counts as a valid PARTIAL/multi-word match.
+def _bounded_skill_match(a: str, b: str) -> bool:
+    """True if normalized skill keys `a` and `b` are equal, or one
+    appears as a whole space-bounded run of token(s) inside the other."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return re.search(rf"(?<!\S){re.escape(shorter)}(?!\S)", longer) is not None
+
+
 def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     jd_title = _title_tokens(requirements.title)
 
@@ -323,7 +356,7 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     tech_keys = {canonical_skill_key(t) for t in exp.technologies if t}
     skill_hit = 0.0
     if jd_skills:
-        hits = sum(1 for k in tech_keys if k in jd_skills or any(k in s or s in k for s in jd_skills if s))
+        hits = sum(1 for k in tech_keys if any(_bounded_skill_match(k, s) for s in jd_skills if s))
         skill_hit = min(1.0, hits / max(1, len(jd_skills))) if tech_keys else 0.0
         text_blob = normalize_skill_text(
             " ".join([exp.title, " ".join(exp.technologies), " ".join(exp.responsibilities)])
@@ -331,7 +364,7 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
         mentioned = 0
         for req in requirements.required_skills:
             req_keys = normalize_requirement_skills(req)
-            if any(k and k in text_blob for k in req_keys):
+            if any(k and re.search(rf"(?<!\S){re.escape(k)}(?!\S)", text_blob) for k in req_keys):
                 mentioned += 1
         if requirements.required_skills:
             skill_hit = max(skill_hit, mentioned / len(requirements.required_skills))
