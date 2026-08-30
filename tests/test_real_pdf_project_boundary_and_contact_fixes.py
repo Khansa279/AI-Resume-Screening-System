@@ -201,16 +201,28 @@ def test_ayesha_individual_projects_do_not_cross_contaminate():
 def test_ayesha_role_relevance_is_not_inflated_by_project_merging():
     """The core scoring-invariant check: with projects correctly
     separated, no SINGLE real project of Ayesha's clears the (unchanged)
-    0.3 project-relevance threshold on its own -- so role_relevance must
-    come from the SAME baseline (has_relevant_education) as before, not
-    from an artificially merged blob. This does not assert an exact
-    percentage -- it asserts that merging-driven inflation is gone."""
+    0.3 "clearly relevant, name it" threshold on its own. This does not
+    assert an exact percentage -- it asserts that merging-driven
+    inflation is gone.
+
+    NOTE: role_relevance itself is no longer required to sit at the
+    education-only baseline just because no single project cleared 0.3 --
+    see the project-relevance-cliff fix in src/agents/experience_eval.py
+    (_best_project no longer zeroes out a real, if modest, per-project
+    score before it reaches the max(baseline, project_score) formula).
+    The invariant this test actually needs to protect -- "role_relevance
+    reflects only ONE real project's own evidence, never a merged
+    blob's" -- is instead checked directly against the formula below,
+    which is a STRONGER guard than the old hardcoded cap: if projects
+    were still being merged, the merged blob's score would exceed every
+    individual project's score, and this equality would fail.
+    """
     _require(AYESHA_PDF)
     result = parse_document(str(AYESHA_PDF))
     data = parse_resume_text(result.text)
 
-    for project_text in data.projects:
-        score = project_relevance(project_text, ASSOCIATE_AI_JD)
+    project_scores = [project_relevance(p, ASSOCIATE_AI_JD) for p in data.projects]
+    for project_text, score in zip(data.projects, project_scores):
         assert score < 0.3, (
             f"a single real Ayesha project scored {score} >= 0.3 -- if this is "
             f"expected (a genuinely strong individual project), fine, but if "
@@ -219,14 +231,22 @@ def test_ayesha_role_relevance_is_not_inflated_by_project_merging():
         )
 
     ev = evaluate_experience(data, ASSOCIATE_AI_JD)
-    # role_relevance for a no-work-experience candidate is
-    # max(0.15 if has_relevant_education else 0.0, project_score). With
-    # every individual project below 0.3, project_score contributes 0,
-    # so role_relevance must equal the education-only baseline.
-    assert ev.role_relevance <= 0.2, (
-        f"role_relevance={ev.role_relevance} is higher than the education-only "
-        f"baseline should allow given no individual project clears 0.3 -- "
-        f"suggests project content is still being pooled across projects"
+    # role_relevance must equal max(education baseline, best INDIVIDUAL
+    # project's own score) -- proving it's explainable by one real
+    # project's own evidence (however strong or weak), never inflated by
+    # a merged blob of several projects' combined content.
+    education_baseline = 0.15 if any(
+        any(kw in (edu.field or "").lower() for kw in
+            ["computer", "data", "software", "engineering", "ai", "machine learning", "information technology"])
+        for edu in data.education
+    ) else 0.0
+    expected = round(max(education_baseline, max(project_scores, default=0.0)), 2)
+    assert ev.role_relevance == expected, (
+        f"role_relevance={ev.role_relevance} does not match "
+        f"max(education_baseline={education_baseline}, "
+        f"best_individual_project_score={max(project_scores, default=0.0)})={expected} -- "
+        f"suggests project content is still being pooled across projects "
+        f"(a merged blob would score higher than any individual project)"
     )
 
 

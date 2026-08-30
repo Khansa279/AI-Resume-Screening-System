@@ -446,14 +446,43 @@ def project_relevance(project_text: str, requirements: JobRequirements) -> float
 
 
 def _best_project(projects: list[str], requirements: JobRequirements) -> tuple[float, str | None]:
+    """Return the (score, text) of whichever listed project is most
+    relevant to the job requirements, on the full continuous 0-1
+    project_relevance() scale.
+
+    Deliberately NOT gated by _PROJECT_RELEVANCE_THRESHOLD here.
+
+    CONFIRMED BUG (this function previously zeroed out any result below
+    the threshold): project_relevance()'s skill_hit component is
+    quantized in thirds (0.75 * matched/3, for matched in {0, 1, 2,
+    3+}), so a project that genuinely demonstrates exactly ONE of the
+    JD's combined required+preferred skills -- real, structured
+    evidence, not noise -- scores exactly 0.25 with no other overlap.
+    That lands just under the 0.3 threshold. evaluate_experience()
+    feeds this score into `role_relevance = max(education_baseline,
+    project_score)`, a formula whose whole design is "take whichever
+    signal is strongest" -- but the old gate silently collapsed that
+    0.25 down to 0.0 first, so a project scoring HIGHER than a
+    candidate's own education baseline (0.15) could still contribute
+    nothing, indistinguishable from having listed no project at all.
+    That is a discontinuity in the scoring, not a deliberate design
+    choice: nothing about the max()-based role_relevance formula calls
+    for discarding real, if modest, evidence.
+
+    The threshold itself is not being removed -- it still governs
+    whether a project is clearly strong enough to be *named* in
+    strengths/reasoning (see `relevant_project` in evaluate_experience,
+    a presentation decision distinct from the underlying score). Only
+    the scoring contribution is now continuous, matching how every
+    other signal in this module (job_relevance, years_relevant credit)
+    already behaves.
+    """
     best_score = 0.0
     best_project: str | None = None
     for project_text in projects or []:
         score = project_relevance(project_text, requirements)
         if score > best_score:
             best_score, best_project = score, project_text
-    if best_score < _PROJECT_RELEVANCE_THRESHOLD:
-        return 0.0, None
     return best_score, best_project
 
 
@@ -478,7 +507,15 @@ def evaluate_experience(resume_data: ResumeData, requirements: JobRequirements) 
         ) if resume_data.education else False
 
         project_score, best_project = _best_project(resume_data.projects, requirements)
-        relevant_project = best_project is not None
+        # `relevant_project` gates NAMING a project in strengths/reasoning --
+        # a presentation judgment ("is this clearly strong enough to call
+        # out"), kept at the existing 0.3 bar. It is intentionally separate
+        # from role_relevance below, which uses the full continuous
+        # project_score so a project with real-but-modest evidence (e.g.
+        # matching exactly one required skill, scoring 0.25) still raises
+        # role_relevance via max() when it exceeds the education baseline,
+        # instead of being discarded outright. See _best_project's docstring.
+        relevant_project = best_project is not None and project_score >= _PROJECT_RELEVANCE_THRESHOLD
         role_relevance = round(max(0.15 if has_relevant_education else 0.0, project_score), 2)
 
         strengths = []
@@ -499,11 +536,21 @@ def evaluate_experience(resume_data: ResumeData, requirements: JobRequirements) 
             f"{experience_score:.2f} using the same years-required scale "
             f"applied to candidates who do have work history."
         ]
+        baseline_only = 0.15 if has_relevant_education else 0.0
         if relevant_project:
             reasoning_parts.append(
                 f"Role relevance is boosted by a relevant project "
                 f"(\"{_project_title(best_project)}\"), which is not "
                 f"counted as professional experience."
+            )
+        elif best_project is not None and project_score > baseline_only:
+            # Project score is real (non-zero, and above whatever baseline
+            # already applies) but below the "clearly relevant, name it"
+            # bar -- still worth a factual note rather than silence, since
+            # role_relevance above did factor it in.
+            reasoning_parts.append(
+                "Role relevance includes a modest contribution from a listed "
+                "project showing partial, though not clearly strong, relevance."
             )
         elif has_relevant_education:
             reasoning_parts.append("Role relevance reflects a related academic background.")

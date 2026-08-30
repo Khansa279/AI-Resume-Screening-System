@@ -208,3 +208,137 @@ def test_d_candidates_with_real_work_experience_are_unaffected_by_projects_chang
     with_projects = evaluate_experience(data, reqs)
     without_projects = evaluate_experience(data.model_copy(update={"projects": []}), reqs)
     assert with_projects.model_dump() == without_projects.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# (e) Project-relevance hard-cliff fix (deferred from the original Batch 6
+# investigation, addressed once project-boundary parsing was fixed
+# separately).
+#
+# REAL BUG: `_best_project` zeroed out a project's score entirely whenever
+# it fell below `_PROJECT_RELEVANCE_THRESHOLD` (0.3), even though
+# `evaluate_experience` feeds that score into
+# `role_relevance = max(education_baseline, project_score)` -- a formula
+# whose whole point is to take whichever signal is strongest. Because
+# `project_relevance()`'s skill_hit component is quantized in thirds
+# (0.75 * matched/3), a project that genuinely demonstrates exactly ONE
+# of the JD's combined required+preferred skills scores exactly 0.25 --
+# real, structured evidence -- which sits just under the 0.3 cliff and
+# was previously discarded outright, indistinguishable from having no
+# project at all, even when 0.25 > a candidate's own 0.15 education
+# baseline.
+#
+# FIX: `_best_project` now returns the raw, continuous score (never
+# gated to 0.0). The 0.3 threshold still gates ONLY whether a project is
+# named by title in strengths/reasoning (`relevant_project` in
+# evaluate_experience) -- a presentation judgment, kept exactly as
+# before. These tests assert the STRUCTURAL invariants (continuity,
+# max()-based contribution, unaffected messaging threshold) rather than
+# any single arbitrary percentage.
+# ---------------------------------------------------------------------------
+
+def test_e_project_matching_exactly_one_required_skill_scores_below_threshold():
+    """Pin the exact quantization that produces the cliff case: matching
+    1 of several combined required+preferred skills, with zero title/
+    responsibility overlap, must land at 0.25 -- below the 0.3 threshold
+    but clearly non-zero, real evidence."""
+    project = (
+        "Factory Logistics Simulator -- a desktop app written in Python "
+        "to model factory floor logistics"
+    )
+    score = project_relevance(project, ENTRY_LEVEL_JD)
+    assert score == 0.25
+    assert score < 0.3
+
+
+def test_e_best_project_no_longer_zeroes_out_a_below_threshold_score():
+    """Core fix: _best_project must return the real score/text, not
+    collapse it to (0.0, None), once it clears zero."""
+    project = (
+        "Factory Logistics Simulator -- a desktop app written in Python "
+        "to model factory floor logistics"
+    )
+    score, text = _best_project([project], ENTRY_LEVEL_JD)
+    assert score == 0.25
+    assert text == project
+
+
+def test_e_modest_project_raises_role_relevance_above_baseline_via_max():
+    """End-to-end: a project scoring between the education baseline
+    (0.15) and the naming threshold (0.3) must still raise role_relevance
+    above the baseline -- the exact case the old cliff discarded."""
+    project = (
+        "Factory Logistics Simulator -- a desktop app written in Python "
+        "to model factory floor logistics"
+    )
+    baseline_ev = evaluate_experience(_entry_level_candidate(), ENTRY_LEVEL_JD)
+    boosted_ev = evaluate_experience(_entry_level_candidate(projects=[project]), ENTRY_LEVEL_JD)
+
+    assert baseline_ev.role_relevance == 0.15
+    assert boosted_ev.role_relevance == 0.25
+    assert boosted_ev.role_relevance > baseline_ev.role_relevance
+
+
+def test_e_below_threshold_project_still_not_named_in_strengths():
+    """The 0.3 threshold is UNCHANGED for the "name it" messaging
+    decision: a 0.25-scoring project raises the number but is still not
+    confident enough to be called out by title in strengths."""
+    project = (
+        "Factory Logistics Simulator -- a desktop app written in Python "
+        "to model factory floor logistics"
+    )
+    ev = evaluate_experience(_entry_level_candidate(projects=[project]), ENTRY_LEVEL_JD)
+    assert not any("Relevant project" in s for s in ev.strengths)
+    assert "Relevant academic background" in ev.strengths
+
+
+def test_e_project_at_or_above_threshold_is_still_named_unchanged():
+    """Regression guard: a project that DOES clear 0.3 must keep being
+    named by title exactly as before this fix."""
+    project = (
+        "Flood Severity Prediction -- built a Machine Learning model using "
+        "Python and scikit-learn to predict flood severity from weather data"
+    )
+    score, _ = _best_project([project], ENTRY_LEVEL_JD)
+    assert score >= 0.3
+    ev = evaluate_experience(_entry_level_candidate(projects=[project]), ENTRY_LEVEL_JD)
+    assert any("Relevant project" in s for s in ev.strengths)
+
+
+def test_e_unrelated_zero_score_project_still_contributes_nothing():
+    """Regression guard: a genuinely unrelated project (score 0.0) must
+    still leave role_relevance exactly at the baseline -- the fix only
+    stops discarding NON-zero scores, it does not manufacture relevance
+    out of nothing."""
+    project = (
+        "Personal Blog Website -- a responsive blog built with HTML, CSS, "
+        "and a headless CMS for content management"
+    )
+    assert project_relevance(project, ENTRY_LEVEL_JD) == 0.0
+    ev = evaluate_experience(_entry_level_candidate(projects=[project]), ENTRY_LEVEL_JD)
+    assert ev.role_relevance == 0.15
+    assert not any("Relevant project" in s for s in ev.strengths)
+
+
+def test_e_best_project_score_is_monotonic_with_threshold_boundary():
+    """Continuity check across the old cliff boundary: as project
+    relevance crosses 0.3, role_relevance must move smoothly (no
+    downward jump), unlike the old behavior where crossing back below
+    0.3 caused a discontinuous drop to the bare baseline."""
+    below = evaluate_experience(
+        _entry_level_candidate(projects=[
+            "Factory Logistics Simulator -- a desktop app written in Python "
+            "to model factory floor logistics"
+        ]),
+        ENTRY_LEVEL_JD,
+    )
+    above = evaluate_experience(
+        _entry_level_candidate(projects=[
+            "Flood Severity Prediction -- built a Machine Learning model using "
+            "Python and scikit-learn to predict flood severity from weather data"
+        ]),
+        ENTRY_LEVEL_JD,
+    )
+    assert below.role_relevance == 0.25
+    assert above.role_relevance == 0.5
+    assert below.role_relevance < above.role_relevance
