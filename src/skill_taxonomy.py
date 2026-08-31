@@ -71,6 +71,50 @@ _SKILL_ENTRIES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Recommendation Systems", "technical", ("recommendation systems", "recommender systems")),
     ("Feature Engineering", "technical", ("feature engineering",)),
     ("Model Evaluation", "technical", ("model evaluation", "model training")),
+    # Common ML sub-concepts that show up as their own literal resume/JD
+    # terms (e.g. "built supervised classification models", "applied
+    # cross-validation", "trained regression models") but were previously
+    # entirely absent from the taxonomy -- so even when a candidate's
+    # resume text explicitly named them, SkillExtractorAgent could never
+    # recognize them as skills at all, and they surfaced as "completely
+    # missing" regardless of real textual evidence. These are each their
+    # OWN canonical skill, distinct from "Machine Learning" -- adding them
+    # here does NOT make "Machine Learning" satisfy any of these
+    # requirements; a candidate who only lists generic ML experience with
+    # no supporting text for these specific concepts still shows them as
+    # gaps (see test_skill_relationship_matching.py for both directions).
+    #
+    # "Supervised Learning"/"Unsupervised Learning"/"Cross-validation" use
+    # their full, unambiguous phrase as the alias -- no plausible
+    # non-ML meaning exists for these phrases.
+    ("Supervised Learning", "technical", ("supervised learning",)),
+    ("Unsupervised Learning", "technical", ("unsupervised learning",)),
+    ("Cross-validation", "technical", (
+        "cross validation", "cross-validation", "k fold cross validation",
+        "kfold cross validation", "k-fold cross validation",
+    )),
+    # "Classification" and "Regression" are deliberately NOT registered
+    # with their bare, single-word form as a matching alias: "regression"
+    # alone collides with the unrelated QA term "regression testing"
+    # (common on non-ML resumes), and "classification" alone can appear
+    # in non-ML contexts (e.g. data/asset classification for compliance).
+    # Matching only ML-specific phrasing avoids crediting an unrelated
+    # skill. The canonical DISPLAY name is still the bare word ("Regression"
+    # / "Classification"), so once a resume's own ML-context phrasing is
+    # recognized, the extracted skill's name exactly equals a bare
+    # "Regression"/"Classification" JD requirement string and is credited
+    # as an exact match via SkillsMatcherAgent's existing name-comparison
+    # step -- no change needed there.
+    ("Classification", "technical", (
+        "classification model", "classification models", "classification algorithm",
+        "classification algorithms", "classification task", "classification problem",
+        "binary classification", "multi-class classification",
+    )),
+    ("Regression", "technical", (
+        "regression model", "regression models", "regression analysis",
+        "regression algorithm", "regression algorithms", "linear regression",
+        "logistic regression",
+    )),
     ("REST APIs", "technical", ("rest apis", "rest api", "restful apis", "restful", "restful api", "rest")),
     ("GraphQL", "technical", ("graphql",)),
     ("Microservices", "technical", ("microservices", "micro services", "microservice")),

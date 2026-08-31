@@ -129,6 +129,20 @@ _ROLE_FAMILY_KEYWORDS: dict[str, frozenset[str]] = {
     "devops": frozenset({"devops", "sre", "infrastructure"}),
     "mobile": frozenset({"mobile", "ios", "android"}),
     "qa": frozenset({"qa", "quality", "test", "testing", "sdet"}),
+    # AI/ML engineering titles ("AI Engineer", "ML Engineer", "AI/ML
+    # Engineer", "NLP Engineer"). "ai"/"ml"/"nlp" are distinctive
+    # abbreviations (unlike the ambiguous common-English words already
+    # rejected for this taxonomy -- "server"/"client"/"platform", see the
+    # module-level bug note above) that essentially never appear in an
+    # unrelated job title, so they're safe single-token family keywords
+    # in the same spirit as "ui" (frontend) and "qa" (QA) already are.
+    # Multi-word phrases ("machine learning", "artificial intelligence",
+    # "deep learning", "data science") are matched separately in
+    # _primary_role_family, since a single token from them ("machine",
+    # "learning", "data" alone) IS ambiguous (e.g. "Machine Operator",
+    # "Learning & Development Manager") the same way "server"/"client"
+    # were -- only the whole phrase is a safe, unambiguous signal.
+    "ai_ml": frozenset({"ai", "ml", "nlp"}),
     # Domain-less engineering titles ("Software Engineer", "Developer"
     # alone). Checked LAST -- see _primary_role_family -- so a title that
     # also names a specific domain (e.g. "Backend Developer") is
@@ -136,11 +150,17 @@ _ROLE_FAMILY_KEYWORDS: dict[str, frozenset[str]] = {
     "generic_swe": frozenset({"software", "engineer", "developer", "programmer"}),
 }
 
+# Multi-word AI/ML phrases checked as literal substrings of the whole
+# normalized title (not single tokens -- see the "ai_ml" keyword-set
+# comment above for why individual words from these phrases are NOT
+# safe standalone keywords).
+_AI_ML_TITLE_PHRASES = ("machine learning", "artificial intelligence", "deep learning", "data science")
+
 # Priority order for resolving a title to ONE primary family when its
 # tokens match more than one specific-family keyword set (rare, e.g. a
 # "Backend/Frontend" combined title) -- first match wins. "generic_swe"
 # is intentionally excluded here; it's only used as a last-resort fallback.
-_SPECIFIC_FAMILY_ORDER = ("backend", "frontend", "fullstack", "data", "devops", "mobile", "qa")
+_SPECIFIC_FAMILY_ORDER = ("backend", "frontend", "fullstack", "data", "devops", "mobile", "qa", "ai_ml")
 
 # Symmetric relatedness between DIFFERENT specific families, and between
 # a specific family and the generic-engineering fallback. 0.0-1.0.
@@ -187,6 +207,16 @@ _ROLE_RELATEDNESS: dict[frozenset[str], float] = {
     frozenset({"devops", "generic_swe"}): 0.45,
     frozenset({"mobile", "generic_swe"}): 0.45,
     frozenset({"qa", "generic_swe"}): 0.4,
+    # ai_ml: added alongside the new "ai_ml" family (see
+    # _ROLE_FAMILY_KEYWORDS above). ai_ml<->data mirrors the existing
+    # backend<->devops adjacency (0.45) -- ML engineering and data
+    # science roles have a real, well-established professional overlap
+    # (shared tooling, shared pipelines). ai_ml<->generic_swe (0.55)
+    # mirrors backend<->generic_swe -- a bare "Software Engineer" title
+    # genuinely doesn't specify a domain, so partial credit reflects
+    # real ambiguity, not a claim the domains are related.
+    frozenset({"ai_ml", "data"}): 0.45,
+    frozenset({"ai_ml", "generic_swe"}): 0.55,
 }
 
 
@@ -196,7 +226,14 @@ def _primary_role_family(title: str) -> str | None:
     (backend/frontend/...) always win over the generic engineering
     fallback, so "Backend Developer" resolves to "backend", not
     "generic_swe", even though "developer" alone would also match."""
-    tokens = set(normalize_skill_text(title).split())
+    normalized = normalize_skill_text(title)
+    tokens = set(normalized.split())
+    # Multi-word AI/ML phrase check first (e.g. "Machine Learning
+    # Engineer") -- these phrases are unambiguous as whole strings even
+    # though their individual words are not (see _AI_ML_TITLE_PHRASES'
+    # docstring comment above).
+    if any(phrase in normalized for phrase in _AI_ML_TITLE_PHRASES):
+        return "ai_ml"
     for family in _SPECIFIC_FAMILY_ORDER:
         if tokens & _ROLE_FAMILY_KEYWORDS[family]:
             return family
