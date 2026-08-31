@@ -115,6 +115,50 @@ _SKILL_ENTRIES: list[tuple[str, str, tuple[str, ...]]] = [
         "regression algorithm", "regression algorithms", "linear regression",
         "logistic regression",
     )),
+    # Model-evaluation sub-concepts. A compound JD requirement like
+    # "Model evaluation techniques (cross-validation, precision, recall,
+    # F1-score, ROC-AUC, MAE, RMSE)" only matches a candidate's resume if
+    # at least one of the individual metrics it lists is a taxonomy entry
+    # that also shows up (explicitly or inferred) in the resume text --
+    # before these entries existed, none of precision/recall/F1/ROC-AUC/
+    # MAE/RMSE/data-preprocessing were recognized at all, so a resume
+    # that clearly discussed these metrics still left the whole compound
+    # requirement unmatched.
+    #
+    # "Precision" and "Recall" are deliberately NOT registered with their
+    # bare, single-word form, for the same reason "Regression" and
+    # "Classification" above aren't: standalone "precision" collides with
+    # non-ML usage (precision manufacturing/instruments, "attention to
+    # precision"), and standalone "recall" collides with unrelated,
+    # common usage (product recall, memory recall, "I recall that...").
+    # Only unambiguous, ML-metric-specific phrasing is matched --
+    # including the common "precision, recall" / "precision and recall"
+    # pairing used in the reported compound requirement itself, which
+    # normalizes to the "precision recall" alias below.
+    ("Precision", "technical", (
+        "precision score", "precision metric", "model precision",
+        "classification precision", "precision and recall", "precision/recall",
+        "precision recall",
+    )),
+    ("Recall", "technical", (
+        "recall score", "recall metric", "model recall",
+        "classification recall", "recall and precision", "recall/precision",
+    )),
+    ("F1-score", "technical", (
+        "f1 score", "f1-score", "f1 metric", "f-1 score", "f measure", "f1 measure",
+    )),
+    ("ROC-AUC", "technical", (
+        "roc auc", "roc-auc", "auc roc", "roc curve", "auc score",
+        "area under the curve", "area under curve",
+    )),
+    ("MAE", "technical", ("mean absolute error", "mae")),
+    ("RMSE", "technical", (
+        "root mean squared error", "root mean square error", "rmse",
+    )),
+    ("Data Preprocessing", "technical", (
+        "data preprocessing", "data pre-processing", "data pre processing",
+        "data cleaning", "data wrangling",
+    )),
     ("REST APIs", "technical", ("rest apis", "rest api", "restful apis", "restful", "restful api", "rest")),
     ("GraphQL", "technical", ("graphql",)),
     ("Microservices", "technical", ("microservices", "micro services", "microservice")),

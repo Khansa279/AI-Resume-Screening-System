@@ -280,10 +280,27 @@ def _store_resume_file(source_path: str, position_id: int) -> str:
 # ============================================================================
 
 def _build_explanation(skills_match, experience_eval, final_output) -> dict:
-    matching_skills = [
-        m.matched_skill for m in skills_match.matches
-        if m.matched and m.matched_skill
-    ]
+    # Multiple JD requirements can independently resolve to the SAME
+    # candidate skill (e.g. both "Model evaluation techniques (...)" and
+    # a separate "Precision and recall" requirement can each match on
+    # the candidate's "Precision" skill) -- each such match is still a
+    # legitimate, distinct SkillMatch (scoring/per-requirement matching
+    # is untouched), but the human-facing matching_skills list should
+    # name each matched skill once, not once per requirement it
+    # satisfied. Dedupe case-insensitively while preserving first-seen
+    # order so the display list stays stable and readable (e.g. "Machine
+    # Learning, Machine Learning, Machine Learning" -> "Machine
+    # Learning").
+    seen_matching_skills: set[str] = set()
+    matching_skills: list[str] = []
+    for m in skills_match.matches:
+        if not (m.matched and m.matched_skill):
+            continue
+        key = m.matched_skill.strip().casefold()
+        if key in seen_matching_skills:
+            continue
+        seen_matching_skills.add(key)
+        matching_skills.append(m.matched_skill)
     skill_gaps = [
         m.requirement for m in skills_match.matches
         if not m.matched and m.soft_skill_status != "not_mentioned"
