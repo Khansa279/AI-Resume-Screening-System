@@ -368,6 +368,40 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
 
     title_score = _overlap(job_title, jd_title)
 
+    # CONFIRMED BUG: _title_tokens() deliberately keeps generic
+    # seniority/role words ("senior", "engineer", "developer", "software",
+    # "associate", "junior", "lead", "intern" -- see _STOP, and Batch 7's
+    # rationale for why _title_tokens must NOT strip them: doing so
+    # collapsed titles like "Senior Software Engineer" to an empty token
+    # set and zeroed title_score entirely). That's correct for titles
+    # that ALSO share a distinctive/domain word, but when the ONLY shared
+    # tokens between two titles are generic role words, the raw Jaccard
+    # overlap still credits it -- e.g. "Senior QA Engineer" vs "Senior
+    # Backend Engineer" share only {"senior", "engineer"} and score a
+    # lexical title_score of 0.5 (job_relevance()=0.23 overall) purely
+    # from words that appear in nearly every engineering title regardless
+    # of domain. This directly contradicts the role-family matrix's own
+    # documented intent a few lines below (_ROLE_RELATEDNESS's 0.0
+    # default is described as "a genuine 'no relationship'", and the
+    # Batch 10 comment explicitly removed backend<->frontend/data credit
+    # for the exact same reason: an "artificial, unjustified boost...
+    # purely because both happen to be software roles"). The family
+    # backstop already declines to credit backend<->qa, backend<->data,
+    # backend<->mobile, etc. (not in the matrix, so 0.0) -- but the
+    # lexical side had no equivalent guard and could still smuggle that
+    # credit back in through shared seniority/role vocabulary alone.
+    #
+    # Fix: if every token the two titles share is a generic word (per the
+    # existing _STOP list -- no new word list invented), the lexical
+    # score contributes nothing; only a shared DISTINCTIVE word (e.g.
+    # "backend", "python", "qa") counts as real lexical evidence. This
+    # does not touch _title_tokens itself (so the Batch 7 empty-set
+    # collapse fix is untouched and titles still tokenize the same way),
+    # does not touch the role-family backstop below, and does not lower
+    # title_score for any case where a real distinctive word is shared.
+    if title_score > 0 and not ((job_title & jd_title) - _STOP):
+        title_score = 0.0
+
     # Deterministic role-family backstop: lexical overlap alone can't see
     # that e.g. "Senior Software Engineer" is plausibly (not fully)
     # relevant to a "Backend Engineer" JD when they share no distinctive
