@@ -95,12 +95,38 @@ _SENIORITY = [
 # seniority isn't a semantic-relevance signal.
 # ============================================================================
 
+#
+# CONFIRMED BUG: "server", "client", and "platform" were included as
+# family-membership keywords on the theory that they're common shorthand
+# for "backend"/"frontend"/"devops" work (e.g. "server-side", "client-side",
+# "platform team"). But _primary_role_family() only ever sees single,
+# already-tokenized words with no surrounding context -- it cannot tell
+# "Server" (a restaurant waiter) from "Server" (backend infrastructure),
+# or "Client Relations Manager" (a non-technical account-management title)
+# from "Client-Side Developer". Because family membership feeds directly
+# into _role_family_score(), which can hand out a FULL 1.0 title_score via
+# max() when candidate and JD resolve to the same family, this let a
+# waiter's "Server" job title score job_relevance()=0.45 against a
+# "Backend Engineer" JD, and a "Client Relations Manager" or "Platform
+# Sales Manager" title score 0.45 against a Frontend/DevOps JD -- entirely
+# from an ambiguous common-English word, with zero real skill or
+# responsibility overlap (reproduced directly via job_relevance(); see
+# tests/test_role_family_ambiguous_keywords.py).
+#
+# Fix: drop these three ambiguous words from the keyword sets. Genuine
+# backend/frontend/devops titles remain covered -- "backend"/"frontend"/
+# "devops" themselves, plus "sre"/"infrastructure" for devops and "ui" for
+# frontend, are all still present and are not common non-technical job-title
+# words. A title that only carried the removed word (e.g. "Platform
+# Engineer") now falls through to the "generic_swe" bucket via "engineer"
+# and still gets partial (not zero, not full) family credit -- a graceful
+# reduction in confidence rather than a false positive.
 _ROLE_FAMILY_KEYWORDS: dict[str, frozenset[str]] = {
-    "backend": frozenset({"backend", "server"}),
-    "frontend": frozenset({"frontend", "ui", "client"}),
+    "backend": frozenset({"backend"}),
+    "frontend": frozenset({"frontend", "ui"}),
     "fullstack": frozenset({"fullstack", "full"}),
     "data": frozenset({"data", "analyst", "analytics", "scientist"}),
-    "devops": frozenset({"devops", "sre", "infrastructure", "platform"}),
+    "devops": frozenset({"devops", "sre", "infrastructure"}),
     "mobile": frozenset({"mobile", "ios", "android"}),
     "qa": frozenset({"qa", "quality", "test", "testing", "sdet"}),
     # Domain-less engineering titles ("Software Engineer", "Developer"
