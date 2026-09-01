@@ -87,8 +87,35 @@ _SKILL_ENTRIES: list[tuple[str, str, tuple[str, ...]]] = [
     # "Supervised Learning"/"Unsupervised Learning"/"Cross-validation" use
     # their full, unambiguous phrase as the alias -- no plausible
     # non-ML meaning exists for these phrases.
-    ("Supervised Learning", "technical", ("supervised learning",)),
-    ("Unsupervised Learning", "technical", ("unsupervised learning",)),
+    #
+    # ELISION FIX: a resume/JD very commonly coordinates the two terms and
+    # elides the repeated head noun -- "supervised and unsupervised
+    # learning" (not "supervised learning and unsupervised learning").
+    # extract_canonical_skills does literal contiguous-substring matching,
+    # so the bare "supervised learning" alias never actually appears
+    # inside "supervised and unsupervised learning" (the word after
+    # "supervised" is "and", not "learning") -- only the second half's
+    # full phrase ("unsupervised learning") is literally present. That
+    # silently dropped "Supervised Learning" (and, symmetrically,
+    # "Unsupervised Learning" when the coordination is written the other
+    # way round: "unsupervised and supervised learning") even though the
+    # resume text plainly claims both. Fixed by registering the
+    # coordinated form itself, in both orders and with the punctuation
+    # variants normalize_skill_text produces ("&"/"," collapse to a bare
+    # space; "and" is spelled out verbatim) -- not a new matching
+    # mechanism, just the additional literal phrases this elision
+    # produces. Confirmed via the real production pipeline (see
+    # tests/test_supervised_unsupervised_elided_coordination.py).
+    ("Supervised Learning", "technical", (
+        "supervised learning",
+        "supervised and unsupervised learning",
+        "supervised unsupervised learning",
+    )),
+    ("Unsupervised Learning", "technical", (
+        "unsupervised learning",
+        "unsupervised and supervised learning",
+        "unsupervised supervised learning",
+    )),
     ("Cross-validation", "technical", (
         "cross validation", "cross-validation", "k fold cross validation",
         "kfold cross validation", "k-fold cross validation",
