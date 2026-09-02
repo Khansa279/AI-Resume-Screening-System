@@ -2,16 +2,22 @@
 
 Deterministic: years from dates/durations, relevance from title/technology
 overlap with the job description. Same parsed resume + same requirements
-always produce the same ExperienceEvaluation. No LLM on the normal path.
+always produce the same ExperienceEvaluation. No LLM on the normal path
+(a small, OPT-IN, fallback-safe LLM hint exists for ambiguous title/role
+matches -- see "generalized semantic role relevance" below -- but it is
+disabled unless ENABLE_LLM_ROLE_RELEVANCE is set and it can never lower a
+score or run the show by itself).
 """
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import date
 from typing import Any
 
 from .base import BaseAgent
+from ..config import get_config
 from ..models import ResumeData, JobRequirements, ExperienceEvaluation, WorkExperience
 from ..skill_taxonomy import (
     canonical_skill_key,
@@ -57,208 +63,141 @@ _SENIORITY = [
 
 
 # ============================================================================
-# Deterministic role-family taxonomy for semantic-ish title relevance
+# Generalized (non-hardcoded) semantic role relevance
 #
-# WHY THIS EXISTS: lexical Jaccard overlap (_title_tokens/_overlap) only
-# recognizes titles that share literal words -- "Backend Engineer" vs
-# "Backend Developer" overlap on "backend"/"engineer"-ish tokens, but
-# "Senior Software Engineer" vs "Backend Engineer - Python" share only
-# "engineer" against a 5-word union, scoring ~0.09-0.2 even though a
-# software engineer is plausibly (not fully) relevant to a backend role,
-# and a "Data Analyst" or "Frontend Developer" title shares that same
-# "engineer"/"developer" token overlap despite being a genuinely
-# different discipline. Lexical overlap alone cannot tell these apart.
+# WHY THIS REPLACED THE OLD APPROACH: this module used to carry a small,
+# hand-curated map from title keywords ("backend", "frontend", "ai_ml", ...)
+# to a coarse "role family", plus a hand-curated relatedness matrix between
+# families. That is a finite, hardcoded catalogue of job-role concepts --
+# every unseen role either fell through to a vague "generic_swe" bucket or
+# scored 0.0 relatedness purely because nobody had added it to the map yet
+# (the "ai_ml" family above is itself evidence of this: someone had to keep
+# coming back to hand-add new roles one at a time). That's not
+# production-ready: it requires a person to edit this file every time a new
+# kind of role shows up, and it's fundamentally biased toward common
+# software-engineering titles.
 #
-# WHY NOT AN LLM CALL HERE: job_relevance() runs once per work-experience
-# entry, per candidate, per screening -- a batch run over many candidates
-# with multiple jobs each would mean many LLM calls on the hot scoring
-# path. That reintroduces exactly the problems this pipeline has already
-# been fixed to avoid elsewhere (Batch 3/5): Groq rate-limit risk, added
-# latency, and nondeterministic output feeding directly into a numeric
-# score that this project's own tests require to be reproducible (see
-# test_experience_evaluator_agent_makes_no_llm_call and every
-# `e1.model_dump() == e2.model_dump()` determinism assertion in this
-# file's test suite). A cached/local embedding model was also considered,
-# but titles are short, low-vocabulary strings where a small, explicit,
-# reviewable mapping is at least as accurate as an embedding similarity
-# score, is exactly reproducible, needs no model weights or new heavy
-# dependency, and is trivial to unit test and extend by hand.
+# GENERALIZED APPROACH: instead of classifying a title into a fixed set of
+# named families, this measures how much a candidate's ACTUAL demonstrated
+# skills and responsibilities overlap with what the JD actually asks for --
+# using the same shared skill taxonomy (src/skill_taxonomy.py) the rest of
+# this pipeline already relies on for skill matching. That taxonomy is a
+# general-purpose catalogue of technologies/tools/concepts (Python, PyTorch,
+# Kubernetes, NLP, ...), not a list of job titles, so it needs no new entry
+# to handle a brand-new title. A "Machine Learning Engineer" JD and a "Data
+# Scientist" candidate who used PyTorch/NLP overlap heavily on real skill
+# signal even though neither title appears anywhere in this file and the
+# titles themselves share no words -- see _semantic_role_relevance below.
 #
-# APPROACH: a small, hand-curated map from title keywords -> a coarse
-# "role family" (backend/frontend/fullstack/data/devops/mobile/qa, plus
-# a "generic_swe" catch-all for domain-less titles like bare "Software
-# Engineer"/"Developer"), plus a symmetric relatedness matrix between
-# families. This ONLY ever raises title_score (via max() with the
-# existing lexical score below) -- it never lowers a title that already
-# scores well lexically, and it deliberately does NOT distinguish
-# seniority ("Senior X" and "X" resolve to the same family) since
-# seniority isn't a semantic-relevance signal.
+# WHY NOT A FULL EMBEDDING MODEL: this environment can't reliably download
+# a hosted embedding model at request time, and job_relevance() runs once
+# per work-experience entry per candidate -- a hot scoring path where this
+# project's own test suite requires deterministic, reproducible output (see
+# every `e1.model_dump() == e2.model_dump()` assertion in this file's
+# tests). A signature built from the SAME taxonomy already used for skill
+# matching is deterministic, needs no extra dependency or network access,
+# and grows automatically as skill_taxonomy.py grows -- no role-specific
+# edits required.
+#
+# OPTIONAL LLM ASSIST: for genuinely ambiguous cases (the deterministic
+# signature overlap lands in a middle band -- neither confidently related
+# nor confidently unrelated), an OPT-IN LLM hint can nudge title relevance
+# further. It is disabled unless ENABLE_LLM_ROLE_RELEVANCE is set, it can
+# only ever RAISE the score (never lower it, same as the old family
+# backstop it replaces), it never determines the final candidate score by
+# itself (it only feeds into title_score, which is one of three weighted
+# components inside job_relevance(), itself only one input to the overall
+# match score), and any failure/unavailability (no API key, network error,
+# bad response) is caught and silently ignored -- the deterministic
+# signature score is always what's used when the LLM isn't available or
+# doesn't return something usable.
 # ============================================================================
 
-#
-# CONFIRMED BUG: "server", "client", and "platform" were included as
-# family-membership keywords on the theory that they're common shorthand
-# for "backend"/"frontend"/"devops" work (e.g. "server-side", "client-side",
-# "platform team"). But _primary_role_family() only ever sees single,
-# already-tokenized words with no surrounding context -- it cannot tell
-# "Server" (a restaurant waiter) from "Server" (backend infrastructure),
-# or "Client Relations Manager" (a non-technical account-management title)
-# from "Client-Side Developer". Because family membership feeds directly
-# into _role_family_score(), which can hand out a FULL 1.0 title_score via
-# max() when candidate and JD resolve to the same family, this let a
-# waiter's "Server" job title score job_relevance()=0.45 against a
-# "Backend Engineer" JD, and a "Client Relations Manager" or "Platform
-# Sales Manager" title score 0.45 against a Frontend/DevOps JD -- entirely
-# from an ambiguous common-English word, with zero real skill or
-# responsibility overlap (reproduced directly via job_relevance(); see
-# tests/test_role_family_ambiguous_keywords.py).
-#
-# Fix: drop these three ambiguous words from the keyword sets. Genuine
-# backend/frontend/devops titles remain covered -- "backend"/"frontend"/
-# "devops" themselves, plus "sre"/"infrastructure" for devops and "ui" for
-# frontend, are all still present and are not common non-technical job-title
-# words. A title that only carried the removed word (e.g. "Platform
-# Engineer") now falls through to the "generic_swe" bucket via "engineer"
-# and still gets partial (not zero, not full) family credit -- a graceful
-# reduction in confidence rather than a false positive.
-_ROLE_FAMILY_KEYWORDS: dict[str, frozenset[str]] = {
-    "backend": frozenset({"backend"}),
-    "frontend": frozenset({"frontend", "ui"}),
-    "fullstack": frozenset({"fullstack", "full"}),
-    "data": frozenset({"data", "analyst", "analytics", "scientist"}),
-    "devops": frozenset({"devops", "sre", "infrastructure"}),
-    "mobile": frozenset({"mobile", "ios", "android"}),
-    "qa": frozenset({"qa", "quality", "test", "testing", "sdet"}),
-    # AI/ML engineering titles ("AI Engineer", "ML Engineer", "AI/ML
-    # Engineer", "NLP Engineer"). "ai"/"ml"/"nlp" are distinctive
-    # abbreviations (unlike the ambiguous common-English words already
-    # rejected for this taxonomy -- "server"/"client"/"platform", see the
-    # module-level bug note above) that essentially never appear in an
-    # unrelated job title, so they're safe single-token family keywords
-    # in the same spirit as "ui" (frontend) and "qa" (QA) already are.
-    # Multi-word phrases ("machine learning", "artificial intelligence",
-    # "deep learning", "data science") are matched separately in
-    # _primary_role_family, since a single token from them ("machine",
-    # "learning", "data" alone) IS ambiguous (e.g. "Machine Operator",
-    # "Learning & Development Manager") the same way "server"/"client"
-    # were -- only the whole phrase is a safe, unambiguous signal.
-    "ai_ml": frozenset({"ai", "ml", "nlp"}),
-    # Domain-less engineering titles ("Software Engineer", "Developer"
-    # alone). Checked LAST -- see _primary_role_family -- so a title that
-    # also names a specific domain (e.g. "Backend Developer") is
-    # classified by that domain, not diluted into the generic bucket.
-    "generic_swe": frozenset({"software", "engineer", "developer", "programmer"}),
-}
 
-# Multi-word AI/ML phrases checked as literal substrings of the whole
-# normalized title (not single tokens -- see the "ai_ml" keyword-set
-# comment above for why individual words from these phrases are NOT
-# safe standalone keywords).
-_AI_ML_TITLE_PHRASES = ("machine learning", "artificial intelligence", "deep learning", "data science")
-
-# Priority order for resolving a title to ONE primary family when its
-# tokens match more than one specific-family keyword set (rare, e.g. a
-# "Backend/Frontend" combined title) -- first match wins. "generic_swe"
-# is intentionally excluded here; it's only used as a last-resort fallback.
-_SPECIFIC_FAMILY_ORDER = ("backend", "frontend", "fullstack", "data", "devops", "mobile", "qa", "ai_ml")
-
-# Symmetric relatedness between DIFFERENT specific families, and between
-# a specific family and the generic-engineering fallback. 0.0-1.0.
-#
-# IMPORTANT (Batch 10 fix): this matrix ONLY lists pairs with a
-# DEFENSIBLE, principled reason to be non-zero. Every other pair --
-# including every one NOT listed below -- falls through to 0.0 via
-# _ROLE_RELATEDNESS.get(..., 0.0) in _role_family_score. That default
-# must stay a genuine "no relationship", not a place to park a vague
-# "still kind of engineering-adjacent" guess. An earlier version of this
-# matrix included entries like backend<->frontend=0.15 and
-# backend<->data=0.15 on exactly that reasoning, which gave Frontend
-# Developer and Data Analyst titles a small but real positive semantic
-# score against a Backend JD purely because both happen to be software
-# roles -- an artificial, unjustified boost. Those entries are removed.
-#
-# The only relationships kept are ones with an actual reason:
-#   - backend<->fullstack, frontend<->fullstack: "fullstack" IS backend
-#     + frontend by definition, so this is real overlap, not a guess.
-#   - backend<->devops, fullstack<->devops: backend engineers routinely
-#     own deployment/CI/infra as part of the role -- a genuine,
-#     well-established professional adjacency.
-#   - <specific family>: default 0.0 against every OTHER specific family
-#     not listed above (frontend<->data, backend<->mobile, data<->qa,
-#     etc.) -- these are just different disciplines with no inherent
-#     overlap, and get no credit.
-#   - <specific family>-generic_swe: a title like "Software Engineer"
-#     genuinely doesn't specify a domain, so partial credit here
-#     reflects real ambiguity about the candidate's actual focus, not a
-#     claim that the domains are related.
-#
-# Two titles resolving to the SAME specific family score 1.0 (handled as
-# a special case in _role_family_score, not listed here); two titles
-# both resolving to "generic_swe" score 0.5 (ambiguous on both sides).
-_ROLE_RELATEDNESS: dict[frozenset[str], float] = {
-    frozenset({"backend", "fullstack"}): 0.75,
-    frozenset({"frontend", "fullstack"}): 0.75,
-    frozenset({"backend", "devops"}): 0.45,
-    frozenset({"fullstack", "devops"}): 0.35,
-    frozenset({"backend", "generic_swe"}): 0.55,
-    frozenset({"frontend", "generic_swe"}): 0.5,
-    frozenset({"fullstack", "generic_swe"}): 0.6,
-    frozenset({"data", "generic_swe"}): 0.4,
-    frozenset({"devops", "generic_swe"}): 0.45,
-    frozenset({"mobile", "generic_swe"}): 0.45,
-    frozenset({"qa", "generic_swe"}): 0.4,
-    # ai_ml: added alongside the new "ai_ml" family (see
-    # _ROLE_FAMILY_KEYWORDS above). ai_ml<->data mirrors the existing
-    # backend<->devops adjacency (0.45) -- ML engineering and data
-    # science roles have a real, well-established professional overlap
-    # (shared tooling, shared pipelines). ai_ml<->generic_swe (0.55)
-    # mirrors backend<->generic_swe -- a bare "Software Engineer" title
-    # genuinely doesn't specify a domain, so partial credit reflects
-    # real ambiguity, not a claim the domains are related.
-    frozenset({"ai_ml", "data"}): 0.45,
-    frozenset({"ai_ml", "generic_swe"}): 0.55,
-}
+def _role_signature(title: str, technologies: list[str] | None, responsibilities: list[str] | None) -> set[str]:
+    """A generic, non-hardcoded fingerprint of "what this role actually
+    involves": canonical taxonomy skills mentioned anywhere in the title,
+    technologies, or responsibility text, plus plain title tokens. Built
+    entirely from src/skill_taxonomy.py (a general skills/tools catalogue)
+    and simple tokenization -- no fixed list of role/job-title names is
+    involved, so this works identically for a title this project has
+    never seen before."""
+    text_blob = " ".join([title or "", " ".join(technologies or []), " ".join(responsibilities or [])])
+    skill_keys = {canonical_skill_key(name) for name, _category in extract_canonical_skills(text_blob)}
+    return skill_keys | _title_tokens(title)
 
 
-def _primary_role_family(title: str) -> str | None:
-    """The single most-specific role family a title's tokens name, or
-    None if nothing in the taxonomy matches at all. Specific domains
-    (backend/frontend/...) always win over the generic engineering
-    fallback, so "Backend Developer" resolves to "backend", not
-    "generic_swe", even though "developer" alone would also match."""
-    normalized = normalize_skill_text(title)
-    tokens = set(normalized.split())
-    # Multi-word AI/ML phrase check first (e.g. "Machine Learning
-    # Engineer") -- these phrases are unambiguous as whole strings even
-    # though their individual words are not (see _AI_ML_TITLE_PHRASES'
-    # docstring comment above).
-    if any(phrase in normalized for phrase in _AI_ML_TITLE_PHRASES):
-        return "ai_ml"
-    for family in _SPECIFIC_FAMILY_ORDER:
-        if tokens & _ROLE_FAMILY_KEYWORDS[family]:
-            return family
-    if tokens & _ROLE_FAMILY_KEYWORDS["generic_swe"]:
-        return "generic_swe"
-    return None
+def _semantic_role_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
+    """Generalized (non-hardcoded) replacement for the old role-family
+    taxonomy backstop. Scores how much a candidate's demonstrated
+    skills/responsibilities overlap with what the JD's title, required/
+    preferred skills, and responsibilities actually call for -- so
+    relevance tracks real overlapping work, not literal title matching.
+    Always 0.0-1.0; 0.0 when there's no recognizable overlap. Unlike the
+    old family lookup, there is no "unrecognized title" special case to
+    fall back from, since nothing here depends on a fixed title
+    vocabulary -- an entirely unseen title degrades gracefully to
+    whatever real skill/responsibility signal is actually present."""
+    candidate_sig = _role_signature(exp.title, exp.technologies, exp.responsibilities)
+    jd_sig = _role_signature(
+        requirements.title,
+        (requirements.required_skills or []) + (requirements.preferred_skills or []),
+        requirements.responsibilities,
+    )
+    return _overlap(candidate_sig, jd_sig)
 
 
-def _role_family_score(candidate_title: str, jd_title: str) -> float | None:
-    """Deterministic role-family relatedness between two job titles.
+# Band within which the deterministic signature score is genuinely
+# ambiguous -- not confidently related, not confidently unrelated -- and
+# where an optional LLM hint (see below) is allowed to help, if enabled.
+_AMBIGUOUS_RELEVANCE_LOW = 0.05
+_AMBIGUOUS_RELEVANCE_HIGH = 0.4
 
-    Returns None when the JD title doesn't name any recognizable role
-    family (blank title, or wording entirely outside this taxonomy) --
-    callers should fall back to plain lexical overlap in that case, not
-    treat "nothing recognized" as "zero relevance".
+_LLM_SCORE_RE = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def _llm_role_relevance_hint(
+    candidate_title: str, candidate_context: str, jd_title: str, jd_context: str,
+) -> float | None:
+    """Optional, OPT-IN LLM-assisted relevance hint for ambiguous title/
+    role comparisons that the deterministic signature overlap couldn't
+    confidently resolve either way.
+
+    Returns a 0.0-1.0 relevance score, or None if the feature is disabled,
+    no LLM is configured, or the call fails for any reason -- callers
+    MUST treat None as "no hint available" and keep using the
+    deterministic score, never as "0 relevance". This function never
+    raises; every failure path is caught and degrades to None so the rest
+    of the (fully deterministic) pipeline is completely unaffected when
+    no LLM is available.
     """
-    jd_family = _primary_role_family(jd_title)
-    if jd_family is None:
+    if os.getenv("ENABLE_LLM_ROLE_RELEVANCE", "").strip().lower() not in ("1", "true", "yes"):
         return None
-    cand_family = _primary_role_family(candidate_title)
-    if cand_family is None:
-        return 0.0
-    if cand_family == jd_family:
-        return 0.5 if jd_family == "generic_swe" else 1.0
-    return _ROLE_RELATEDNESS.get(frozenset({jd_family, cand_family}), 0.0)
+    try:
+        get_config()  # raises ValueError if no provider/API key is configured
+        from .base import create_llm
+
+        llm = create_llm(temperature=0.0)
+        prompt = (
+            "You are helping score how relevant a candidate's past role is to "
+            "an open job. Respond with ONLY a single number between 0.0 and "
+            "1.0 (no words, no explanation).\n\n"
+            f"Open job title: {jd_title!r}\n"
+            f"Open job skills/responsibilities: {jd_context[:500]!r}\n\n"
+            f"Candidate's past role title: {candidate_title!r}\n"
+            f"Candidate's past role skills/responsibilities: {candidate_context[:500]!r}\n\n"
+            "How relevant is the candidate's past role to the open job, "
+            "based on the ACTUAL WORK described (not just whether the titles "
+            "match)? Respond with ONLY the number."
+        )
+        response = llm.invoke(prompt)
+        text = getattr(response, "content", str(response)).strip()
+        match = _LLM_SCORE_RE.search(text)
+        if not match:
+            return None
+        return min(1.0, max(0.0, float(match.group(1))))
+    except Exception:
+        return None
 
 
 def _parse_one_date(text: str) -> date | None:
@@ -418,7 +357,7 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     # lexical title_score of 0.5 (job_relevance()=0.23 overall) purely
     # from words that appear in nearly every engineering title regardless
     # of domain. This directly contradicts the role-family matrix's own
-    # documented intent a few lines below (_ROLE_RELATEDNESS's 0.0
+    # documented intent a few lines below (the old _ROLE_RELATEDNESS's 0.0
     # default is described as "a genuine 'no relationship'", and the
     # Batch 10 comment explicitly removed backend<->frontend/data credit
     # for the exact same reason: an "artificial, unjustified boost...
@@ -439,16 +378,37 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     if title_score > 0 and not ((job_title & jd_title) - _STOP):
         title_score = 0.0
 
-    # Deterministic role-family backstop: lexical overlap alone can't see
-    # that e.g. "Senior Software Engineer" is plausibly (not fully)
-    # relevant to a "Backend Engineer" JD when they share no distinctive
-    # words. This only ever RAISES title_score (max()), so a title that
-    # already scores well lexically (shared literal words) is unaffected,
-    # and it only applies when the JD title names a recognizable family --
-    # see _role_family_score. Does not touch skill_hit or resp_score.
-    family_score = _role_family_score(exp.title, requirements.title)
-    if family_score is not None:
-        title_score = max(title_score, family_score)
+    # Generalized semantic backstop (replaces the old hardcoded role-family
+    # taxonomy): lexical title overlap alone can't see that e.g. a "Data
+    # Scientist" candidate with NLP/PyTorch experience is genuinely
+    # relevant to a "Machine Learning Engineer" JD when the titles share
+    # no words. _semantic_role_relevance() measures overlap of actual
+    # demonstrated skills/responsibilities (via the shared skill taxonomy)
+    # instead of relying on any fixed list of job-title names, so it works
+    # identically for titles this project has never seen before. This
+    # only ever RAISES title_score (max()), so a title that already
+    # scores well lexically is unaffected, and it never touches skill_hit
+    # or resp_score.
+    semantic_score = _semantic_role_relevance(exp, requirements)
+    title_score = max(title_score, semantic_score)
+
+    # Optional, OPT-IN LLM assist for genuinely ambiguous cases only (see
+    # module-level comment above _llm_role_relevance_hint). Disabled by
+    # default; any failure/unavailability falls straight back to the
+    # deterministic score above with no behavior change.
+    if _AMBIGUOUS_RELEVANCE_LOW <= title_score <= _AMBIGUOUS_RELEVANCE_HIGH:
+        llm_hint = _llm_role_relevance_hint(
+            exp.title,
+            " ".join((exp.technologies or []) + (exp.responsibilities or [])),
+            requirements.title,
+            " ".join(
+                (requirements.required_skills or [])
+                + (requirements.preferred_skills or [])
+                + (requirements.responsibilities or [])
+            ),
+        )
+        if llm_hint is not None:
+            title_score = max(title_score, llm_hint)
 
     tech_keys = {canonical_skill_key(t) for t in exp.technologies if t}
     skill_hit = 0.0

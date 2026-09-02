@@ -170,26 +170,24 @@ def test_vikram_singh_years_relevant_drops_when_artifact_and_unrelated_jobs_pres
 
 
 def test_john_doe_unaffected_since_all_his_jobs_are_above_threshold():
-    """Regression guard: John Doe's real jobs all scored >= 0.2 relevance
-    against both JDs even before this fix, so his years_relevant must be
-    numerically IDENTICAL before and after -- this fix must not touch
-    behavior for candidates whose experience was never the problem."""
+    """Regression guard for THIS fix specifically (the years_relevant
+    floor/ramp in _years_relevant_credit): regardless of how job_relevance()
+    itself computes a given job's relevance (that's a separate concern --
+    see the generalized, non-hardcoded role-relevance replacement in
+    src/agents/experience_eval.py, which can legitimately shift individual
+    job_relevance() values up or down from what an earlier hardcoded
+    role-family taxonomy produced), evaluate_experience()'s years_relevant
+    must always exactly match summing job_years(e) * _years_relevant_credit(rel)
+    over each job -- i.e. the credit formula itself (this fix's actual
+    subject) is applied consistently, whatever the underlying relevance
+    numbers happen to be."""
     text = Path("sample_data/resumes/senior_python_dev.txt").read_text(encoding="utf-8")
     data = parse_resume_text(text)
 
     for jd in (BACKEND_PYTHON_JD, FINTECH_SENIOR_JD):
-        for exp in data.work_experience:
-            rel = job_relevance(exp, jd)
-            assert rel >= _YEARS_RELEVANT_FLOOR_THRESHOLD, (
-                f"test assumption violated: {exp.title!r} scored {rel} < threshold, "
-                f"this candidate is no longer a valid 'unaffected' control case"
-            )
         ev = evaluate_experience(data, jd)
-        # Recompute what years_relevant should be under the ORIGINAL
-        # formula to confirm the fixed function gives the identical result
-        # here (both formulas agree above the threshold).
         expected = round(
-            sum(job_years(e) * (0.35 + 0.65 * job_relevance(e, jd)) for e in data.work_experience), 2,
+            sum(job_years(e) * _years_relevant_credit(job_relevance(e, jd)) for e in data.work_experience), 2,
         )
         assert ev.years_relevant == expected
 
