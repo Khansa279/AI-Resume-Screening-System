@@ -54,8 +54,8 @@ Thumbs.db
 sample_data/resumes/resume_05_khansa_aslam.pdf
 sample_data/resumes/resume_06_ayesha_naeem.pdf
 
-# SQLite database
-*.db
+# # SQLite database
+# *.db
 
 # Generated resume files
 storage/resumes/
