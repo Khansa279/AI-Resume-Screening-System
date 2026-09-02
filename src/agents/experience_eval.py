@@ -2,11 +2,17 @@
 
 Deterministic: years from dates/durations, relevance from title/technology
 overlap with the job description. Same parsed resume + same requirements
-always produce the same ExperienceEvaluation. No LLM on the normal path
-(a small, OPT-IN, fallback-safe LLM hint exists for ambiguous title/role
-matches -- see "generalized semantic role relevance" below -- but it is
-disabled unless ENABLE_LLM_ROLE_RELEVANCE is set and it can never lower a
-score or run the show by itself).
+always produce the same ExperienceEvaluation. No LLM/embedding call on the
+normal path by default:
+  - A small, OPT-IN, fallback-safe LLM hint exists for ambiguous title/
+    role matches -- see "generalized semantic role relevance" below --
+    disabled unless ENABLE_LLM_ROLE_RELEVANCE is set.
+  - A real, embedding-based semantic-similarity signal (src/embeddings.py)
+    is used automatically WHEN a provider is configured (a Gemini API
+    key present), and is a complete no-op otherwise -- see
+    "_embedding_role_relevance" below.
+Neither can ever lower a score, run the show by itself, or make the
+pipeline fail when unavailable.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from typing import Any
 
 from .base import BaseAgent
 from ..config import get_config
+from ..embeddings import embedding_relevance
 from ..models import ResumeData, JobRequirements, ExperienceEvaluation, WorkExperience
 from ..skill_taxonomy import (
     canonical_skill_key,
@@ -147,11 +154,75 @@ def _semantic_role_relevance(exp: WorkExperience, requirements: JobRequirements)
     return _overlap(candidate_sig, jd_sig)
 
 
+# ============================================================================
+# Real embedding-based semantic relevance (src/embeddings.py)
+#
+# This is an ADDITIONAL signal on top of _semantic_role_relevance() above,
+# not a replacement for it. _semantic_role_relevance() is deterministic,
+# free, and always available, but it can only recognize overlap through
+# literal title words or entries already in skill_taxonomy.py -- a
+# "Registered Nurse" vs "Critical Care Nurse" or "Machine Learning
+# Engineer" vs "AI Research Scientist" pair may share little of either
+# and still be genuinely, highly related work. A text-embedding model
+# captures that kind of relatedness directly, without needing every
+# possible synonym pair hand-added to the taxonomy.
+#
+# This is entirely optional: see src/embeddings.py's module docstring for
+# the full reliability contract. In short, `embedding_relevance()` never
+# raises and returns None whenever no provider is configured/available or
+# a call fails for any reason -- the caller (job_relevance(), below) then
+# simply doesn't apply it, identical to how the LLM hint's None is
+# already handled.
+# ============================================================================
+
+
+def _embedding_context_text(
+    title: str, extra_skills: list[str] | None, responsibilities: list[str] | None,
+) -> str:
+    """Plain-text blob to embed for role/work relevance -- title +
+    skills/technologies + responsibilities, the same ingredients
+    _role_signature() above uses, just as free text for a text-embedding
+    model rather than a taxonomy-driven signature."""
+    parts = [title or "", *(extra_skills or []), *(responsibilities or [])]
+    return ". ".join(p for p in parts if p).strip()
+
+
+def _embedding_role_relevance(exp: WorkExperience, requirements: JobRequirements) -> float | None:
+    """Real, embedding-based semantic similarity for role/title
+    relevance. Returns None whenever an embedding provider isn't
+    available or usable for any reason -- callers MUST treat None as "no
+    signal", never as zero relevance.
+
+    The JD side of this text is identical for every candidate screened
+    against the same JobRequirements, so embed_text()'s cache (keyed by
+    exact text content) means the JD is only ever sent to the provider
+    once per process, no matter how many candidates are screened against
+    it -- see src/embeddings.py.
+    """
+    jd_text = _embedding_context_text(
+        requirements.title,
+        (requirements.required_skills or []) + (requirements.preferred_skills or []),
+        requirements.responsibilities,
+    )
+    candidate_text = _embedding_context_text(exp.title, exp.technologies, exp.responsibilities)
+    return embedding_relevance(jd_text, candidate_text)
+
+
 # Band within which the deterministic signature score is genuinely
 # ambiguous -- not confidently related, not confidently unrelated -- and
 # where an optional LLM hint (see below) is allowed to help, if enabled.
 _AMBIGUOUS_RELEVANCE_LOW = 0.05
 _AMBIGUOUS_RELEVANCE_HIGH = 0.4
+
+# See the calibration note at the embedding integration point inside
+# job_relevance() for the full rationale. In short: when the
+# deterministic signal found ZERO overlap, an embedding score must clear
+# this stricter bar to be trusted at full strength; below it, the score
+# is dampened rather than trusted outright, so a single noisy/moderate
+# embedding similarity can't manufacture relevance with no corroborating
+# evidence at all.
+_EMBEDDING_ZERO_CORROBORATION_TRUST_FLOOR = 0.6
+_EMBEDDING_ZERO_CORROBORATION_DAMPENING = 0.5
 
 _LLM_SCORE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 
@@ -392,10 +463,69 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     semantic_score = _semantic_role_relevance(exp, requirements)
     title_score = max(title_score, semantic_score)
 
+    # Real embedding-based semantic similarity (src/embeddings.py), tried
+    # BEFORE the LLM hint below -- it's cheaper and more deterministic
+    # per call than a chat-model completion, and doesn't need a chat
+    # model configured at all (Gemini's embeddings endpoint is enough).
+    #
+    # CALIBRATION NOTE (production-readiness review): a plain
+    # `title_score = max(title_score, embedding_score)` -- unconditional,
+    # regardless of what the deterministic signal (lexical + taxonomy
+    # signature) found -- was verified to let a SINGLE noisy or merely
+    # moderate embedding score manufacture meaningful relevance out of
+    # thin air for a genuinely unrelated pair (e.g. "Backend Engineer" vs
+    # "Marketing Manager", where lexical/taxonomy overlap is correctly
+    # 0.0). Sentence/text embedding spaces are well known to cluster even
+    # UNRELATED short phrases at a non-trivial baseline cosine similarity
+    # ("anisotropy") -- EMBEDDING_SIMILARITY_FLOOR already exists to
+    # filter the LOW end of that noise, but nothing filtered the MID
+    # range: a moderate-but-not-extreme embedding score (e.g. rescaled
+    # ~0.45-0.65) could still single-handedly raise title_score with
+    # zero other evidence backing it up, since max() has no way to tell
+    # "confidently related" apart from "embedding noise that happens to
+    # be in the middle of the range."
+    #
+    # Fix: when the deterministic signal found ZERO overlap (no shared
+    # title words, no shared taxonomy skills/responsibilities -- i.e.
+    # title_score is still exactly 0.0 at this point), the embedding
+    # score is trusted at full strength ONLY if it clears
+    # _EMBEDDING_ZERO_CORROBORATION_TRUST_FLOOR -- a stricter bar than
+    # the ordinary FLOOR/CEIL rescaling already applies. Below that bar,
+    # its contribution is dampened (not zeroed -- it may still be a real,
+    # if weaker, signal) rather than trusted outright. Once there IS any
+    # deterministic corroboration at all (title_score > 0.0 -- some real
+    # shared word or taxonomy skill), the existing max() behavior is
+    # unchanged, since a second, independent signal agreeing with an
+    # already-present one is exactly when trusting it is safe.
+    #
+    # _EMBEDDING_ZERO_CORROBORATION_TRUST_FLOOR = 0.6 is not an arbitrary
+    # pick: it reuses this module's OWN existing ambiguity boundary
+    # (_AMBIGUOUS_RELEVANCE_HIGH = 0.4, the same value already used to
+    # decide when the LLM hint may fire) with a symmetric margin above
+    # the scale's midpoint (0.5), i.e. "confidently past the ambiguous
+    # zone in the SAME way _AMBIGUOUS_RELEVANCE_HIGH already defines
+    # 'still ambiguous' below it." In raw-cosine terms (before the
+    # existing FLOOR=0.35/CEIL=0.90 rescale), 0.6 rescaled corresponds to
+    # a raw cosine of ~0.68 -- comfortably above the ~0.5-0.65 baseline
+    # noise range the FLOOR constant's own comment already documents.
+    # _EMBEDDING_ZERO_CORROBORATION_DAMPENING = 0.5 is a conservative,
+    # simple halving (not a tuned value -- no live embedding calibration
+    # data is available in this environment) chosen so an unconfirmed
+    # embedding score still contributes SOMETHING (it may be a real, if
+    # weaker, signal) but can never alone account for more than half of
+    # what full trust would have given it.
+    embedding_score = _embedding_role_relevance(exp, requirements)
+    if embedding_score is not None:
+        if title_score > 0.0 or embedding_score >= _EMBEDDING_ZERO_CORROBORATION_TRUST_FLOOR:
+            title_score = max(title_score, embedding_score)
+        else:
+            title_score = max(title_score, embedding_score * _EMBEDDING_ZERO_CORROBORATION_DAMPENING)
+
     # Optional, OPT-IN LLM assist for genuinely ambiguous cases only (see
     # module-level comment above _llm_role_relevance_hint). Disabled by
     # default; any failure/unavailability falls straight back to the
-    # deterministic score above with no behavior change.
+    # deterministic (+ embedding, if it fired) score above with no
+    # behavior change.
     if _AMBIGUOUS_RELEVANCE_LOW <= title_score <= _AMBIGUOUS_RELEVANCE_HIGH:
         llm_hint = _llm_role_relevance_hint(
             exp.title,
