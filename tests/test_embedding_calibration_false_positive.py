@@ -171,6 +171,14 @@ def test_exact_title_match_completely_unaffected_by_the_fix():
 # ---------------------------------------------------------------------------
 
 def test_weights_unchanged_by_calibration_fix():
+    """NOTE: expected_title_score takes max() across BOTH the symmetric
+    Jaccard signature (_semantic_role_relevance) AND the directional,
+    JD-anchored skill-coverage signal (_semantic_role_coverage) added by
+    the under-scoring fix for detailed/senior resume entries -- see
+    experience_eval.py's module-level comment above _semantic_role_coverage.
+    This does not change the 0.45/0.4/0.15 weights this test exists to
+    guard; title_score itself is just correctly no longer computed from
+    the Jaccard signal alone."""
     ee.embedding_relevance = lambda a, b: None
     jd = JobRequirements(
         title="Something With No Recognized Words At All",
@@ -181,6 +189,9 @@ def test_weights_unchanged_by_calibration_fix():
         technologies=["Python", "Django", "PostgreSQL"], responsibilities=[],
     )
     relevance = job_relevance(exp, jd)
-    expected_title_score = ee._semantic_role_relevance(exp, jd)
+    expected_title_score = max(
+        ee._semantic_role_relevance(exp, jd),
+        ee._semantic_role_coverage(exp, jd),
+    )
     expected = round(0.45 * expected_title_score + 0.4 * 1.0 + 0.15 * 0.0, 2)
     assert relevance == expected

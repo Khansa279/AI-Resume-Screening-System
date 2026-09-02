@@ -289,12 +289,22 @@ def test_exact_title_match_relevance_unchanged_with_embeddings_available(topic_p
 def test_job_relevance_weights_are_unchanged(monkeypatch):
     """The 0.45 / 0.4 / 0.15 weighting between title/skill/responsibility
     components must be completely untouched by this change. Embeddings
-    are explicitly disabled here so this test isolates exactly the two
-    pre-existing components (the deterministic title signature backstop
-    from the earlier generalization, and skill_hit) -- confirming the
-    embedding integration only ever ADDS a third max()-combined signal
-    into title_score, without altering the 0.45/0.4/0.15 weight split
-    itself."""
+    are explicitly disabled here so this test isolates exactly the
+    THREE deterministic components that feed title_score (lexical
+    overlap, the symmetric Jaccard signature backstop, and the
+    directional coverage signal added by the under-scoring fix) plus
+    skill_hit -- confirming the embedding integration only ever ADDS a
+    further max()-combined signal into title_score, without altering
+    the 0.45/0.4/0.15 weight split itself.
+
+    NOTE: expected_title_score below takes max() across BOTH
+    _semantic_role_relevance (symmetric Jaccard) AND
+    _semantic_role_coverage (directional, JD-anchored) -- the fix for
+    under-scored strongly-related roles. This does not change the
+    0.45/0.4/0.15 weights this test exists to guard; it only means
+    title_score itself is (correctly) no longer computed from the
+    Jaccard signal alone.
+    """
     monkeypatch.setattr(ee, "embedding_relevance", lambda a, b: None)
     jd = JobRequirements(
         title="Something With No Recognized Words At All",
@@ -306,7 +316,10 @@ def test_job_relevance_weights_are_unchanged(monkeypatch):
         responsibilities=[],
     )
     relevance = job_relevance(exp, jd)
-    expected_title_score = ee._semantic_role_relevance(exp, jd)  # lexical component is 0 here
+    expected_title_score = max(
+        ee._semantic_role_relevance(exp, jd),   # symmetric Jaccard component
+        ee._semantic_role_coverage(exp, jd),    # directional coverage component
+    )
     # skill_hit is 1.0: all 3 required skills are present in exp.technologies
     expected = round(0.45 * expected_title_score + 0.4 * 1.0 + 0.15 * 0.0, 2)
     assert relevance == expected

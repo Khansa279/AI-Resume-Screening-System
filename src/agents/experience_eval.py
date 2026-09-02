@@ -154,6 +154,103 @@ def _semantic_role_relevance(exp: WorkExperience, requirements: JobRequirements)
     return _overlap(candidate_sig, jd_sig)
 
 
+# ----------------------------------------------------------------------------
+# CONFIRMED BUG (production regression investigation, embedding-integration
+# follow-up): _semantic_role_relevance() above measures SYMMETRIC (Jaccard)
+# overlap -- |A∩B| / |A∪B|. That is the right tool when comparing two
+# comparably-sized sets, but it systematically UNDER-SCORES a candidate
+# whose own per-job signature is simply larger than the JD's, which is the
+# ORDINARY case for a detailed/senior resume entry: real-world job bullets
+# routinely mention process/collaboration terms the shared skill taxonomy
+# also recognizes (Agile, Code Review, Leadership, Teamwork, Communication,
+# ...) alongside the core technical work. Every one of those EXTRA terms
+# grows the union denominator and shrinks the ratio, even though none of
+# them contradict the candidate's core alignment with the JD -- a detailed
+# "Senior Machine Learning Engineer" entry (PyTorch, TensorFlow, deep
+# learning, NLP -- plus the usual mentoring/agile/stakeholder bullets any
+# senior role has) can end up scoring a LOWER Jaccard overlap against an
+# "AI/ML Engineer" JD than a terser, less-detailed entry would, purely
+# because the candidate said more about their day-to-day work. Verified:
+# a JD requiring Python/ML/DL/PyTorch/TensorFlow/NLP/CV/Docker/AWS/MLOps
+# against a candidate who demonstrably covers 7 of the JD's own 14
+# signature terms (all the technical ones) still only Jaccard-scores 0.32,
+# because the candidate's own signature also picked up 8 process/soft-skill
+# terms the JD text never mentions.
+#
+# FIX: _semantic_role_coverage() below is a DIRECTIONAL (recall) measure,
+# anchored to the JD's OWN signature size rather than the candidate's:
+# |A∩B| / |jd_sig|. This answers "what fraction of what the JD is actually
+# asking for does the candidate's signature cover" -- extra, unrelated
+# terms on the CANDIDATE's side (verbose bullets, a broader skillset) no
+# longer penalize the score, since they never appear in the denominator.
+#
+# WHY THIS IS SAFE (does not just inflate everything): the numerator is the
+# exact same intersection _semantic_role_relevance() already uses -- a
+# genuinely unrelated pair (zero real overlap) still scores 0.0 here,
+# identically. And unlike a "coverage relative to the SMALLER of the two
+# sets" (Szymkiewicz-Simpson) formula -- which is NOT used here and would
+# be unsafe, since a candidate with a nearly-empty signature could then
+# trivially "cover" 100% of it with a single shared word -- anchoring
+# specifically to the JD's side means the denominator is always the JD's
+# own (typically multi-term, for any real job posting) signature size, not
+# whichever set happens to be smaller.
+#
+# This is combined into title_score via max() alongside the existing
+# Jaccard-based semantic_score (see job_relevance() below) -- the same
+# "only ever raises, never lowers" pattern this module already uses for
+# the LLM hint and the embedding signal, so it cannot regress any existing
+# case that already scored well; it can only rescue cases the symmetric
+# measure was undervaluing. It uses the same general-purpose
+# skill_taxonomy.py signature as _semantic_role_relevance() -- no new
+# fixed role/title vocabulary, so it generalizes to any unseen role
+# exactly like the function it sits alongside.
+# ----------------------------------------------------------------------------
+
+def _skill_signature(title: str, technologies: list[str] | None, responsibilities: list[str] | None) -> set[str]:
+    """Like _role_signature(), but WITHOUT the plain title-token union --
+    only genuine skill_taxonomy.py-recognized canonical skill keys.
+
+    WHY THIS SEPARATE, NARROWER SIGNATURE EXISTS: _semantic_role_coverage()
+    below must only credit a candidate for REAL, taxonomy-recognized
+    skill/technology overlap -- not for the candidate's title merely
+    containing all of the JD title's own words (e.g. "Junior Backend
+    Developer" trivially contains every word in "Backend Developer").
+    That kind of pure title-wording superset relationship is already
+    correctly handled by the existing lexical title_score (_overlap on
+    job_title/jd_title) and by _semantic_role_relevance()'s own Jaccard
+    backstop -- a directional coverage measure anchored to a JD
+    signature made of NOTHING BUT plain title tokens would trivially
+    hit 1.0 for any title superset, which is not evidence of skill
+    coverage at all. Restricting coverage to genuine taxonomy skill
+    keys keeps the new signal scoped to what it was built to fix:
+    technology/skill overlap the symmetric Jaccard measure was diluting."""
+    text_blob = " ".join([title or "", " ".join(technologies or []), " ".join(responsibilities or [])])
+    return {canonical_skill_key(name) for name, _category in extract_canonical_skills(text_blob)}
+
+
+def _semantic_role_coverage(exp: WorkExperience, requirements: JobRequirements) -> float:
+    """Directional counterpart to _semantic_role_relevance(): the fraction
+    of the JD's OWN skill/technology signature (genuine taxonomy-
+    recognized terms only -- see _skill_signature(), NOT plain title
+    words) that the candidate's signature covers, |A∩B| / |jd_skill_sig|,
+    rather than the symmetric Jaccard ratio. See the module-level
+    comment above _skill_signature for why this is restricted to real
+    skill-taxonomy overlap rather than _role_signature()'s full set
+    (which also includes plain title tokens). Returns 0.0 when the JD
+    has no recognizable skill/technology signature at all (nothing to
+    cover) -- never divides by zero, never raises, and never credits a
+    candidate purely for their title containing the JD title's words."""
+    candidate_sig = _skill_signature(exp.title, exp.technologies, exp.responsibilities)
+    jd_sig = _skill_signature(
+        requirements.title,
+        (requirements.required_skills or []) + (requirements.preferred_skills or []),
+        requirements.responsibilities,
+    )
+    if not jd_sig:
+        return 0.0
+    return round(len(candidate_sig & jd_sig) / len(jd_sig), 4)
+
+
 # ============================================================================
 # Real embedding-based semantic relevance (src/embeddings.py)
 #
@@ -462,6 +559,15 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
     # or resp_score.
     semantic_score = _semantic_role_relevance(exp, requirements)
     title_score = max(title_score, semantic_score)
+
+    # Directional coverage counterpart to the symmetric Jaccard score
+    # above -- see _semantic_role_coverage()'s module-level comment for
+    # the full rationale (fixes systematic under-scoring of detailed/
+    # senior resume entries whose own signature is simply larger than
+    # the JD's). Only ever raises title_score, same max()-combination
+    # pattern as semantic_score itself.
+    coverage_score = _semantic_role_coverage(exp, requirements)
+    title_score = max(title_score, coverage_score)
 
     # Real embedding-based semantic similarity (src/embeddings.py), tried
     # BEFORE the LLM hint below -- it's cheaper and more deterministic
