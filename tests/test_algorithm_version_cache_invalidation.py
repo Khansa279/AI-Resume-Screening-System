@@ -201,6 +201,93 @@ def test_screen_candidate_invalidates_when_version_is_none(db_session, tmp_path)
     assert second.algorithm_version == CURRENT_ALGORITHM_VERSION
 
 
+def test_screening_stamped_with_prior_production_version_is_invalidated_and_rescored(db_session, tmp_path):
+    """Regression for the embedding/role-relevance version bump.
+
+    Unlike test_screen_candidate_invalidates_and_rescoures_when_version_is_stale
+    above (which uses an arbitrary synthetic old-version string), this
+    pins the exact PREVIOUS PRODUCTION value of CURRENT_ALGORITHM_VERSION
+    ("2026-08-role-relevance-batch10" -- the version in place before the
+    embedding/role-relevance changes) so a future accidental revert of
+    the bump, or a second bump that forgets to change this literal, is
+    caught directly rather than only via a synthetic placeholder string.
+
+    Simulates exactly the reported symptom: a Screening completed and
+    cached under the old batch10 pipeline (old match_score/role_relevance/
+    years_relevant numbers) must NOT be served as-is once
+    CURRENT_ALGORITHM_VERSION has moved past that string -- it must be
+    invalidated (child rows cleared) and recomputed, reusing the same
+    Screening row.
+    """
+    PRIOR_PRODUCTION_VERSION = "2026-08-role-relevance-batch10"
+    assert CURRENT_ALGORITHM_VERSION != PRIOR_PRODUCTION_VERSION, (
+        "This test assumes CURRENT_ALGORITHM_VERSION has been bumped past "
+        "the prior production version it's meant to invalidate -- if this "
+        "fails, the version bump was reverted or never applied."
+    )
+
+    position_id = _seed_position_and_jd(db_session)
+    resume_path = _write_resume_file(tmp_path)
+
+    first = asyncio.run(
+        screen_candidate(db_session, position_id=position_id, resume_file_path=resume_path)
+    )
+    db_session.flush()
+    first_id = first.id
+
+    # Simulate a screening that was completed and cached BEFORE the
+    # embedding/role-relevance change landed (the exact reported bug:
+    # an existing Alex-Morgan-style Screening stamped under batch10).
+    stale = repo.get_screening(db_session, first_id)
+    stale.algorithm_version = PRIOR_PRODUCTION_VERSION
+    db_session.flush()
+
+    second = asyncio.run(
+        screen_candidate(db_session, position_id=position_id, resume_file_path=resume_path)
+    )
+    db_session.flush()
+
+    # Same row reused (no duplicate Screening created), but recomputed
+    # and re-stamped with the current version -- not silently served.
+    assert second.id == first_id, "must reuse the SAME screening row, not create a duplicate"
+    assert second.algorithm_version == CURRENT_ALGORITHM_VERSION
+    assert second.algorithm_version != PRIOR_PRODUCTION_VERSION
+    assert second.status == "completed"
+    assert second.result is not None
+    assert second.skill_match_result is not None
+    assert second.experience_evaluation is not None
+    assert second.explanation is not None
+
+
+def test_screening_stamped_with_current_version_is_still_reused_unchanged(db_session, tmp_path):
+    """Sanity/non-regression check for requirement #4: existing reuse
+    behavior when stored version == CURRENT_ALGORITHM_VERSION must be
+    completely unaffected by the bump -- same row, same score, still
+    zero recomputation (no new completed_at timestamp)."""
+    position_id = _seed_position_and_jd(db_session)
+    resume_path = _write_resume_file(tmp_path)
+
+    first = asyncio.run(
+        screen_candidate(db_session, position_id=position_id, resume_file_path=resume_path)
+    )
+    db_session.flush()
+    assert first.algorithm_version == CURRENT_ALGORITHM_VERSION
+    first_completed_at = first.completed_at
+    first_score = first.result.match_score
+
+    second = asyncio.run(
+        screen_candidate(db_session, position_id=position_id, resume_file_path=resume_path)
+    )
+    db_session.flush()
+
+    assert second.id == first.id
+    assert second.algorithm_version == CURRENT_ALGORITHM_VERSION
+    assert second.result.match_score == first_score
+    assert second.completed_at == first_completed_at, (
+        "reuse path must not re-run the pipeline -- completed_at should be untouched"
+    )
+
+
 def test_invalidating_one_stale_screening_does_not_touch_other_rows(db_session, tmp_path):
     """Scope discipline: re-scoring ONE stale (resume, JD) pair must not
     disturb any OTHER candidate's Screening for the same JD."""

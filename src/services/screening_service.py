@@ -73,7 +73,7 @@ RESUME_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "storage" /
 # rather than creating a duplicate. This never touches any OTHER
 # candidate's Screening, the Resume row, the JobDescription, or any
 # Ranking.
-CURRENT_ALGORITHM_VERSION = "2026-08-role-relevance-batch10"
+CURRENT_ALGORITHM_VERSION = "2026-09-embedding-role-relevance-v1"
 
 
 class JobAnalysisFailedError(RuntimeError):
