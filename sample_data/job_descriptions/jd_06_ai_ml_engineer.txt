@@ -1,0 +1,45 @@
+Job Description — AI/ML Engineer
+
+Job Title: AI/ML Engineer
+Location: Islamabad, Pakistan
+Experience: 2–4 years
+Employment Type: Full-time
+
+About the Role
+
+We are looking for an AI/ML Engineer to develop, evaluate, and deploy machine learning solutions. The ideal candidate should have strong Python and machine learning fundamentals, experience with NLP and deep learning, and the ability to build production-ready ML pipelines.
+
+Responsibilities
+
+Develop and deploy machine learning models using Python.
+Build supervised and unsupervised learning solutions.
+Perform data preprocessing, feature engineering, and exploratory data analysis.
+Develop classification, regression, and clustering models.
+Build NLP solutions for text/document classification and information extraction.
+Develop deep learning models using PyTorch or TensorFlow/Keras.
+Evaluate models using cross-validation, precision, recall, F1-score, ROC-AUC, MAE, and RMSE.
+Build reproducible ML pipelines.
+Deploy models through REST APIs using FastAPI and Docker.
+Work with SQL databases and structured/unstructured datasets.
+Use Git/GitHub for version control and collaborative development.
+Participate in model optimization, error analysis, and experimentation.
+
+Required Qualifications
+
+Bachelor's degree in Computer Science, Artificial Intelligence, Data Science, or a related field.
+2+ years of experience in machine learning or data science.
+Strong Python programming skills.
+Experience with scikit-learn, Pandas, NumPy, and machine learning algorithms.
+Experience with PyTorch or TensorFlow/Keras.
+Knowledge of NLP, text classification, embeddings, and transformers.
+Experience with supervised and unsupervised learning.
+Understanding of model evaluation and cross-validation.
+Experience with FastAPI, Docker, REST APIs, or similar deployment technologies.
+Working knowledge of SQL and Git/GitHub.
+
+Preferred Qualifications
+
+Experience with AWS or another cloud platform.
+Experience building end-to-end ML systems.
+Familiarity with CI/CD and MLOps practices.
+Strong communication and problem-solving skills.
