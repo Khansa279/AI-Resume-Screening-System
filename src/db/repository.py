@@ -306,6 +306,85 @@ def create_resume(
     return resume
 
 
+def replace_resume_parsed_data(
+    db: Session,
+    resume_id: int,
+    *,
+    summary: str | None = None,
+    skills_section: list[str] | None = None,
+    certifications: list[str] | None = None,
+    projects: list[str] | None = None,
+    parsing_confidence: float | None = None,
+    parsing_notes: list[str] | None = None,
+    work_experience: list[dict] | None = None,
+    skills: list[dict] | None = None,
+) -> models.Resume:
+    """Overwrite an EXISTING Resume row's parsed-data fields and child
+    rows (work_experience, skills) with freshly re-parsed values, in
+    place -- i.e. WITHOUT changing its id, candidate_id, position_id,
+    file_path, raw_text, or content_hash.
+
+    This is the resume-parsing analogue of what a bumped
+    CURRENT_ALGORITHM_VERSION already does for SCORING staleness (see
+    services/screening_service.py): content-hash-based resume reuse
+    means a Resume's raw_text is never re-extracted once stored, but
+    its PARSED representation (work_experience, skills, ...) can still
+    become stale after a resume_parser.py bug fix, since nothing
+    currently re-runs parse_resume_text() against an already-stored
+    raw_text automatically. Use this to bring an existing Resume row's
+    parsed data back in sync with the current parser after such a fix,
+    without re-uploading the original file (which may not even be
+    available -- e.g. in a database snapshot without the matching
+    files/ directory) and without disturbing its identity or any
+    Screening rows that reference it by resume_id.
+
+    Only replaces fields explicitly passed (non-None) -- any field left
+    as None keeps its current stored value, so callers that only want
+    to refresh work_experience (the common case: this is what
+    _parse_experience() bugs actually corrupt) don't have to also
+    resupply everything else.
+
+    Callers are responsible for separately invalidating/re-running any
+    completed Screening rows for this resume afterward (see
+    invalidate_completed_screening) -- this function only touches the
+    Resume row itself, exactly like create_resume does not create a
+    Screening either.
+    """
+    resume = db.get(models.Resume, resume_id)
+    if resume is None:
+        raise ValueError(f"No Resume with id={resume_id}")
+
+    if summary is not None:
+        resume.summary = summary
+    if skills_section is not None:
+        resume.skills_section = skills_section
+    if certifications is not None:
+        resume.certifications = certifications
+    if projects is not None:
+        resume.projects = projects
+    if parsing_confidence is not None:
+        resume.parsing_confidence = parsing_confidence
+    if parsing_notes is not None:
+        resume.parsing_notes = parsing_notes
+
+    if work_experience is not None:
+        for existing in list(resume.work_experience):
+            db.delete(existing)
+        db.flush()
+        for exp in work_experience:
+            db.add(models.ResumeWorkExperience(resume_id=resume.id, **exp))
+
+    if skills is not None:
+        for existing in list(resume.skills):
+            db.delete(existing)
+        db.flush()
+        for skill in skills:
+            db.add(models.CandidateSkill(resume_id=resume.id, **skill))
+
+    db.flush()
+    return resume
+
+
 def list_resumes_for_position(db: Session, position_id: int) -> list[models.Resume]:
     stmt = select(models.Resume).where(models.Resume.position_id == position_id)
     return list(db.scalars(stmt))

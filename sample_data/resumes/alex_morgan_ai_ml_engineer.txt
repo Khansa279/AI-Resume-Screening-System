@@ -1,0 +1,67 @@
+ALEX MORGAN
+AI/ML Engineer | Machine Learning | Python | NLP | Deep Learning
+Islamabad, Pakistan  |  +92 300 1234567  |  alex.morgan@email.com
+linkedin.com/in/alexmorgan  |  github.com/alexmorgan
+PROFESSIONAL SUMMARY
+AI/ML Engineer with 3+ years of experience building and deploying machine learning solutions using Python,
+scikit-learn, PyTorch, TensorFlow, and SQL. Strong background in supervised and unsupervised learning, natural
+language processing (NLP), deep learning, feature engineering, model evaluation, and production ML pipelines.
+Experienced in developing classification, regression, clustering, and NLP systems and deploying APIs with FastAPI
+and Docker.
+TECHNICAL SKILLS
+Programming
+Python, SQL, Bash
+Machine Learning
+scikit-learn, supervised learning, unsupervised learning, classification, regression, clustering,
+feature engineering
+Deep Learning
+PyTorch, TensorFlow, Keras, neural networks, CNNs, RNNs, Transformers
+NLP
+NLP pipelines, text classification, embeddings, TF-IDF, tokenization, sentiment analysis
+Data
+Pandas, NumPy, Matplotlib, data preprocessing, exploratory data analysis, statistics
+MLOps / Deployment
+FastAPI, Docker, REST APIs, ML pipelines, model serving, Git/GitHub
+Databases & Cloud
+PostgreSQL, MySQL, AWS, basic CI/CD
+PROFESSIONAL EXPERIENCE
+Machine Learning Engineer — Nova Analytics | Islamabad, Pakistan | 2023–Present
+- Developed end-to-end machine learning pipelines in Python using Pandas, NumPy, and scikit-learn for customer
+and operational prediction tasks.
+- Built classification and regression models including Logistic Regression, Random Forest, Gradient Boosting, and
+XGBoost; improved model performance through feature engineering and hyperparameter tuning.
+- Designed NLP workflows for document and text classification using TF-IDF, embeddings, preprocessing, and
+transformer-based models.
+- Developed deep learning models with PyTorch and TensorFlow/Keras, including neural networks, CNNs, and
+RNNs.
+- Evaluated models using cross-validation, precision, recall, F1-score, ROC-AUC, MAE, and RMSE; performed error
+analysis and model comparison.
+- Deployed trained models as REST APIs using FastAPI and Docker and collaborated with software engineers to
+integrate ML services into applications.
+Junior Data Scientist — Insight Labs | Rawalpindi, Pakistan | 2022–2023
+- Cleaned and analyzed structured and unstructured datasets using Python, Pandas, and SQL.
+- Implemented K-Means, DBSCAN, and hierarchical clustering for customer segmentation and anomaly exploration.
+- Created reproducible preprocessing and model-training pipelines and documented experiments using Git.
+- Built dashboards and visualizations to communicate model results and data patterns to technical and non-technical
+stakeholders.
+SELECTED PROJECTS
+AI Resume Screening System
+
+
+Built an NLP-based resume screening system that extracts skills, education, experience, and job requirements from
+resumes and job descriptions. Used semantic similarity, weighted skill matching, and ML-based scoring to rank
+candidates.
+Customer Churn Prediction
+Developed a supervised classification pipeline with feature engineering, cross-validation, hyperparameter tuning,
+and F1/ROC-AUC evaluation. Deployed the final model through a FastAPI service.
+NLP Document Classification
+Created a text classification system using TF-IDF and transformer embeddings, comparing traditional machine
+learning models with a neural network approach.
+EDUCATION
+Bachelor of Science in Computer Science — Air University, Islamabad | 2018–2022
+Relevant coursework: Machine Learning, Artificial Intelligence, Deep Learning, Data Mining, Statistics, Databases,
+Natural Language Processing.
+CERTIFICATIONS
+Machine Learning Specialization — Coursera  |  Deep Learning Specialization — Coursera
+ADDITIONAL INFORMATION
+Languages: English, Urdu  |  Availability: Full-time  |  Git/GitHub workflow and collaborative Agile development

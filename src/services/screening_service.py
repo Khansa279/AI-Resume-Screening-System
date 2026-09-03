@@ -73,7 +73,22 @@ RESUME_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "storage" /
 # rather than creating a duplicate. This never touches any OTHER
 # candidate's Screening, the Resume row, the JobDescription, or any
 # Ranking.
-CURRENT_ALGORITHM_VERSION = "2026-09-embedding-role-relevance-v1"
+# 2026-09-resume-parser-bullet-wrap-fix-v1: src/agents/resume_parser.py's
+# _parse_experience() previously misread (a) a wrapped bullet's second
+# physical line (no leading marker -- an ordinary PDF text-wrapping
+# artifact) as a brand-new job's title line, and (b) an unrecognized
+# "Selected Projects"-style heading as leaking into the experience
+# section, fragmenting a single real job into many near-empty fake
+# WorkExperience entries with a flat, wrong 0.5-year default duration
+# each. That directly corrupts job_relevance()/evaluate_experience()'s
+# years_relevant and role_relevance aggregation downstream (garbage in,
+# garbage out) for ANY resume using this common formatting, not a
+# resume-specific issue. Existing Resume rows parsed under the old code
+# still carry the old, fragmented work_experience data -- only a fresh
+# parse (or a corrected one written back, as
+# scripts/reparse_resume_experience.py does) picks up the fix, so this
+# bump alone is necessary but not sufficient; see that script.
+CURRENT_ALGORITHM_VERSION = "2026-09-resume-parser-bullet-wrap-fix-v1"
 
 
 class JobAnalysisFailedError(RuntimeError):

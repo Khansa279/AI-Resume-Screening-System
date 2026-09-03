@@ -89,7 +89,8 @@ _HEADING_RE = re.compile(
     r"education|academic background|education\s*(?:&|and)\s*training|"
     r"technical skills|skills|core competencies|core skills|"
     r"certifications|certificates|"
-    r"projects|personal projects|"
+    r"projects|personal projects|selected projects|key projects|notable projects|"
+    r"academic projects|technical projects|"
     r"awards|activities|languages|"
     r"career break|career gap|employment gap|sabbatical"
     r")\s*:?\s*$",
@@ -119,6 +120,24 @@ _SECTION_ALIASES = {
     "certificates": "certifications",
     "projects": "projects",
     "personal projects": "projects",
+    # "Selected Projects" and its common siblings are just as frequent a
+    # heading wording as bare "Projects" (and were previously completely
+    # unrecognized by _HEADING_RE, above -- an UNRECOGNIZED heading is
+    # not a section boundary at all, so _split_sections() kept routing
+    # everything under it into whichever section was still open, almost
+    # always "experience" immediately above it on a resume). That let
+    # project bullets flow straight into _parse_experience()'s title/
+    # company heuristic and get misread as fake jobs -- the same failure
+    # mode already fixed here once for "Career Break" / "Education &
+    # Training" (see the comment below and
+    # tests/test_priority7_fake_work_experience.py). No new ResumeData
+    # bucket is needed for these; they alias to the same "projects"
+    # section "Projects" itself already uses.
+    "selected projects": "projects",
+    "key projects": "projects",
+    "notable projects": "projects",
+    "academic projects": "projects",
+    "technical projects": "projects",
     # Recognized so the heading itself (and everything under it) stops
     # leaking into whichever section was previously active -- e.g.
     # "CAREER BREAK" was previously unrecognized entirely, so its text
@@ -175,6 +194,95 @@ _NON_JOB_TITLE_RE = re.compile(
     r"^(?:career break|career gap|employment gap|sabbatical)\b",
     re.I,
 )
+
+# ----------------------------------------------------------------------------
+# Job-header line detection, shared by two fixes in _parse_experience() below:
+#
+#   1. INLINE title/company/dates format -- some resumes put the whole job
+#      header on ONE physical line, e.g.
+#          "Machine Learning Engineer — Nova Analytics | Islamabad, Pakistan | 2023–Present"
+#      rather than this parser's other, already-handled convention of a bare
+#      title line followed by a separate "Company | Dates" line. Previously
+#      the WHOLE line was taken as an opaque `title` with no lookahead
+#      consumed, so company/start_date/end_date were silently left empty for
+#      every job using this format -- which in turn made job_years() fall
+#      back to a flat, wrong 0.5-year default instead of computing the
+#      job's real (often multi-year) duration.
+#
+#   2. WRAPPED BULLET CONTINUATION lines -- a bullet's text can word-wrap
+#      across two physical lines in extracted resume text, with the bullet
+#      marker present only on the first line, e.g.:
+#          "- Developed end-to-end machine learning pipelines in Python using Pandas, NumPy, and scikit-learn for customer"
+#          "and operational prediction tasks."
+#      The second line has no leading marker, so the bullet-collection loop
+#      below previously stopped collecting bullets the instant it saw that
+#      line and handed it back to the OUTER loop -- which then read it as a
+#      brand-new job's title line, fabricating a separate (near-empty,
+#      near-zero-relevance, flat-0.5-year) WorkExperience entry per wrapped
+#      bullet. A single senior role with six wrapped bullets could -- and in
+#      a real production resume DID -- fragment into six-plus fake jobs,
+#      each diluting years_relevant and role_relevance in
+#      src/agents/experience_eval.py's aggregation, even though every one of
+#      those fragments' underlying content was genuinely relevant.
+#
+# Both fixes need the SAME signal: "does this line actually look like a new
+# job's header (a company/date line), as opposed to ordinary prose"? A real
+# job header, in every convention this parser already recognizes, pairs a
+# YEAR (or month name) with an explicit separator -- a pipe ("Company |
+# Dates") or an em/en dash ("Title — Company"). Plain wrapped prose (like
+# "and operational prediction tasks.") essentially never does. Requiring
+# BOTH a date signal AND a separator (rather than a bare year, which could
+# appear in ordinary bullet prose too -- "reduced latency by 20% in 2023")
+# keeps this narrowly scoped to genuine header lines.
+_JOB_HEADER_LINE_RE = re.compile(
+    r"(?:\||—|–).{0,80}?" + _DATE_LINE_RE.pattern + r"|" + _DATE_LINE_RE.pattern + r".{0,80}?(?:\||—|–)",
+    re.I,
+)
+
+
+def _looks_like_job_header(line: str) -> bool:
+    """True if `line` plausibly starts a NEW job entry (a company/date
+    header), as opposed to being either ordinary bullet prose or a
+    wrapped continuation of the previous bullet's text. See the
+    module-level comment above _JOB_HEADER_LINE_RE for the full
+    rationale."""
+    return bool(line) and bool(_JOB_HEADER_LINE_RE.search(line))
+
+
+# Only em dash (—) and en dash (–) are recognized as an INLINE title/company
+# separator here -- deliberately NOT a bare hyphen "-". A bare hyphen is
+# already heavily overloaded elsewhere in real titles ("Backend Engineer -
+# Python") and as this parser's own bullet marker, so treating it as a
+# title/company separator would risk splitting ordinary hyphenated titles
+# that have nothing to do with this format. Em/en dash is what this
+# specific "Title — Company | Location | Dates" convention actually uses.
+_INLINE_JOB_HEADER_SPLIT_RE = re.compile(r"^(?P<title>.+?)\s*(?:—|–)\s*(?P<rest>.+)$")
+
+
+def _split_inline_job_header(line: str) -> tuple[str, str, str] | None:
+    """If `line` carries a FULL job header -- title, company, and dates --
+    on one physical line (see _JOB_HEADER_LINE_RE's docstring above for
+    the motivating real example), split it into (title, company,
+    date_blob). Returns None when the line doesn't confidently look like
+    this format (no em/en dash, or no paired date signal), so an
+    ordinary bare title line is left completely untouched and falls
+    through to the existing "next line is company/dates" convention.
+    """
+    if not _looks_like_job_header(line):
+        return None
+    m = _INLINE_JOB_HEADER_SPLIT_RE.match(line)
+    if not m:
+        return None
+    title = m.group("title").strip()
+    rest = m.group("rest").strip()
+    if not title or not rest:
+        return None
+    parts = [p.strip() for p in re.split(r"\s*\|\s*", rest) if p.strip()]
+    if not parts:
+        return None
+    company = parts[0]
+    date_blob = parts[-1] if len(parts) >= 2 else rest
+    return title, company, date_blob
 
 
 def _looks_like_education_or_break_entry(title: str, company: str) -> bool:
@@ -366,37 +474,75 @@ def _parse_experience(text: str) -> list[WorkExperience]:
         if line.startswith(("-", "•", "*")):
             i += 1
             continue
-        # Title line: next lines may be company | location | dates
-        title = line.lstrip("-•*").strip()
+        # Title line: either the FULL header (title/company/dates) sits on
+        # this one line (_split_inline_job_header -- see its docstring for
+        # the real-world format this handles), or -- the older, still
+        # common convention -- company/location/dates sit on the line
+        # AFTER a bare title.
+        raw_title = line.lstrip("-•*").strip()
         company = ""
         duration = ""
         start_date = ""
         end_date = ""
-        look = lines[i + 1].strip() if i + 1 < len(lines) else ""
-        consumed = 0
-        if look and not look.startswith(("-", "•", "*")):
-            consumed = 1
-            parts = [p.strip() for p in re.split(r"\s*\|\s*", look)]
-            if parts:
-                company = parts[0]
-            date_blob = look
-            if len(parts) >= 2:
-                date_blob = parts[-1]
+
+        inline = _split_inline_job_header(raw_title)
+        if inline is not None:
+            title, company, date_blob = inline
             duration = date_blob
             left, right = (re.split(r"\s*(?:-|–|—|to)\s*", date_blob, maxsplit=1) + [""])[:2]
             start_date, end_date = left.strip(), right.strip()
+            consumed = 0
+        else:
+            title = raw_title
+            look = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            consumed = 0
+            if look and not look.startswith(("-", "•", "*")):
+                consumed = 1
+                parts = [p.strip() for p in re.split(r"\s*\|\s*", look)]
+                if parts:
+                    company = parts[0]
+                date_blob = look
+                if len(parts) >= 2:
+                    date_blob = parts[-1]
+                duration = date_blob
+                left, right = (re.split(r"\s*(?:-|–|—|to)\s*", date_blob, maxsplit=1) + [""])[:2]
+                start_date, end_date = left.strip(), right.strip()
         bullets: list[str] = []
         j = i + 1 + consumed
         while j < len(lines):
             nxt = lines[j].strip()
             if not nxt:
-                # blank: maybe next job
+                # A blank line is this parser's existing, reliable signal
+                # for "this job's content has ended" -- unlike a wrapped
+                # bullet continuation (which is the very NEXT physical
+                # line, with nothing between it and the bullet it
+                # continues), so this branch intentionally still breaks
+                # unconditionally on the next non-bulleted content line,
+                # exactly as before the wrapped-continuation fix below.
+                # Only the NO-blank-line case (a bullet immediately
+                # followed by an unmarked continuation line) needed the
+                # new _looks_like_job_header distinction.
                 j += 1
                 if j < len(lines) and lines[j].strip() and not lines[j].strip().startswith(("-", "•", "*")):
                     break
                 continue
             if nxt.startswith(("-", "•", "*")):
                 bullets.append(nxt.lstrip("-•* ").strip())
+                j += 1
+                continue
+            # Non-bulleted, non-blank line while we're mid-way through
+            # collecting this job's bullets. This is either (a) a wrapped
+            # continuation of the PREVIOUS bullet -- the bullet's text
+            # simply word-wrapped onto a second physical line that lost
+            # its marker in extraction -- or (b) a genuinely new job's
+            # header that just isn't bullet-marked. _looks_like_job_header
+            # tells the two apart (see its docstring): only a line that
+            # actually carries date+separator header signal ends bullet
+            # collection here; anything else is folded back onto the
+            # last collected bullet so the OUTER loop never sees it (and
+            # so never mistakes it for a brand-new job's title).
+            if bullets and not _looks_like_job_header(nxt):
+                bullets[-1] = (bullets[-1] + " " + nxt).strip()
                 j += 1
                 continue
             break
