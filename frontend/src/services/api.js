@@ -6,34 +6,17 @@
  * consistent base URL, error handling, and payload shapes so components
  * never construct URLs or parse responses directly.
  *
- * The backend base URL can be overridden via the VITE_API_BASE_URL env
- * var (e.g. in a .env file) -- defaults to the typical local FastAPI dev
- * server address.
- *
- * IMPORTANT: this file only wraps endpoints that actually exist in
- * src/api/routes/*.py:
+ * Endpoints wrapped here (see src/api/routes/*.py):
  *   GET  /health
+ *   GET  /jobs                          (screening history, newest first)
  *   POST /jobs                          (multipart/form-data)
+ *   GET  /jobs/{position_id}
  *   POST /screening/{position_id}/run   (multipart/form-data)
  *   GET  /screening/{position_id}/results
- * There is no separate resume-upload endpoint -- resumes are sent
- * directly as part of the /screening/{position_id}/run request.
  */
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-/**
- * Generic fetch wrapper: builds the full URL, handles JSON/FormData
- * bodies, and normalizes error handling so callers get either parsed
- * JSON or a thrown Error with a useful message.
- *
- * Every error response from the backend (see src/api/main.py's
- * exception handlers) has the shape { error, detail }, where `detail`
- * is either a string (HTTPException / ValueError cases) or a list of
- * validation error objects (422 RequestValidationError). This wrapper
- * normalizes both into a single human-readable string so callers never
- * need to know which failure mode produced it.
- */
 async function request(path, options = {}) {
   let response
   try {
@@ -63,10 +46,7 @@ function extractErrorMessage(data, status) {
     return detail
   }
   if (Array.isArray(detail) && detail.length > 0) {
-    // FastAPI/Pydantic 422 validation errors: [{ loc, msg, type }, ...]
-    return detail
-      .map((entry) => entry.msg || JSON.stringify(entry))
-      .join(' ')
+    return detail.map((entry) => entry.msg || JSON.stringify(entry)).join(' ')
   }
   if (data && typeof data.message === 'string' && data.message.trim()) {
     return data.message
@@ -82,15 +62,18 @@ export function checkHealth() {
 /**
  * Create (or version-update) a job description for a position.
  *
- * POST /jobs (multipart/form-data): title (required), and exactly one
- * of jdText / jdFile.
+ * POST /jobs (multipart/form-data): title (required), organization and
+ * department (optional -- omit to fall back to the backend's default
+ * bucket), and exactly one of jdText / jdFile.
  *
  * Returns JobCreateResponse: { position_id, organization, department,
  * title, jd_version }.
  */
-export function createJob({ title, jdText, jdFile }) {
+export function createJob({ title, organization, department, jdText, jdFile }) {
   const formData = new FormData()
   formData.append('title', title)
+  if (organization) formData.append('organization', organization)
+  if (department) formData.append('department', department)
   if (jdFile) {
     formData.append('jd_file', jdFile)
   } else {
@@ -104,6 +87,28 @@ export function createJob({ title, jdText, jdFile }) {
 }
 
 /**
+ * Fetch a single position's organization/title context.
+ * Returns JobSummary: { position_id, title, organization, department,
+ * current_jd_version }.
+ */
+export function getJob(positionId) {
+  return request(`/jobs/${positionId}`, { method: 'GET' })
+}
+
+/**
+ * List every position ever screened (or set up) via this workspace,
+ * newest activity first, with organization/position context and a
+ * summary of its most recent ranking if one exists.
+ *
+ * Returns JobHistoryEntry[]: { position_id, title, organization,
+ * department, jd_version, status, ranking_id, candidates_screened,
+ * generated_at, top_candidate_name, top_candidate_score }.
+ */
+export function listJobHistory() {
+  return request('/jobs', { method: 'GET' })
+}
+
+/**
  * Run screening for a position against its current job description,
  * uploading one or more resume files in the same request.
  *
@@ -111,7 +116,8 @@ export function createJob({ title, jdText, jdFile }) {
  * or more files, field name "resumes").
  *
  * Returns ScreeningResponse: { position_id, ranking_id,
- * candidates_screened, results: [...] }.
+ * candidates_screened, results: [...], title, organization, department,
+ * generated_at }.
  */
 export function runScreening(positionId, resumeFiles) {
   const formData = new FormData()
@@ -141,6 +147,8 @@ export function getResults(positionId) {
 export default {
   checkHealth,
   createJob,
+  getJob,
+  listJobHistory,
   runScreening,
   getResults,
 }

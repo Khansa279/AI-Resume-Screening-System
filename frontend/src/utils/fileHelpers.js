@@ -1,9 +1,3 @@
-/**
- * Small presentation helpers for the file-attachment UI. No parsing or
- * business logic here -- purely cosmetic (icon choice, size formatting,
- * extension checks) so components stay declarative.
- */
-
 const EXTENSION_ICON_MAP = {
   pdf: '📄',
   docx: '📝',

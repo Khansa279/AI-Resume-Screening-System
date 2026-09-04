@@ -4,6 +4,12 @@
   gap: 1.25rem;
 }
 
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
 .field-group {
   display: flex;
   flex-direction: column;
@@ -32,7 +38,7 @@
   width: 100%;
   padding: 0.7rem 0.85rem;
   font-size: 0.95rem;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface-1);
   color: var(--text-primary);
@@ -47,7 +53,7 @@
 }
 
 .jd-textarea-dropzone {
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--surface-1);
   padding: 0.25rem;
@@ -98,4 +104,10 @@
 
 .jd-file-preview {
   display: flex;
+}
+
+@media (max-width: 560px) {
+  .field-row {
+    grid-template-columns: 1fr;
+  }
 }

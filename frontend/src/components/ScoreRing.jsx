@@ -1,9 +1,3 @@
-/**
- * Small radial meter used to show a candidate's match percentage. Reuses
- * the same "instrument" visual language as the hero signal bars and the
- * breakdown meters in CandidateDetail, so the whole app reads as one
- * consistent measurement system rather than mixed widget styles.
- */
 import './ScoreRing.css'
 
 function scoreTone(score) {

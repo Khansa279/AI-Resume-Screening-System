@@ -7,6 +7,7 @@ do not introduce any new scoring or parsing concepts.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -40,6 +41,26 @@ class JobSummary(BaseModel):
     current_jd_version: Optional[int] = None
 
 
+class JobHistoryEntry(BaseModel):
+    """One row in the screening-history list -- one Position, with its
+    current organization/department context and (if any screening has
+    ever been run for it) a summary of the most recent ranking. Built
+    entirely from existing repository reads; introduces no new scoring
+    or persistence concepts."""
+
+    position_id: int
+    title: str
+    organization: str
+    department: str
+    jd_version: Optional[int] = None
+    status: str = "draft"  # draft | screened
+    ranking_id: Optional[int] = None
+    candidates_screened: int = 0
+    generated_at: Optional[datetime] = None
+    top_candidate_name: Optional[str] = None
+    top_candidate_score: Optional[float] = None
+
+
 # ============================================================================
 # Screening / candidate results
 # ============================================================================
@@ -53,12 +74,6 @@ class ScreeningCandidateResult(BaseModel):
     requires_human: bool
     confidence: float
     error: Optional[str] = None
-    # Already computed and persisted by screening_service._build_explanation
-    # / repository.save_explanation -- previously never exposed over the
-    # API, even though frontend/src/components/CandidateCard.jsx already
-    # has UI for exactly these fields (matchedSkills, skillGaps,
-    # explanation) and silently renders its "unavailable" fallback state
-    # for all of them. No new computation here, just exposing existing data.
     matching_skills: list[str] = Field(default_factory=list)
     skill_gaps: list[str] = Field(default_factory=list)
     explanation: Optional[str] = None
@@ -71,6 +86,15 @@ class ScreeningResponse(BaseModel):
     ranking_id: Optional[int] = None
     candidates_screened: int = 0
     results: list[ScreeningCandidateResult] = Field(default_factory=list)
+    # Organization/position context so the frontend never has to guess
+    # or re-derive which role a set of results belongs to (see
+    # JobSummary -- same shape, just carried alongside the results here
+    # so a single request gives the frontend everything it needs to
+    # render both the header and the ranked list).
+    title: Optional[str] = None
+    organization: Optional[str] = None
+    department: Optional[str] = None
+    generated_at: Optional[datetime] = None
 
 
 # ============================================================================

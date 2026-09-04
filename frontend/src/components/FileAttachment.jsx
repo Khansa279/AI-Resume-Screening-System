@@ -1,10 +1,6 @@
 import { getFileIcon, formatFileSize } from '../utils/fileHelpers'
 import './FileAttachment.css'
 
-/**
- * A single attachment chip -- shows file icon, name, size, and a
- * remove ("x") button. Styled to resemble ChatGPT's file-attachment UI.
- */
 function FileAttachment({ file, onRemove }) {
   return (
     <div className="file-attachment">

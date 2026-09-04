@@ -1,18 +1,12 @@
 import CandidateCard from './CandidateCard'
+import OrgPositionHeader from './OrgPositionHeader'
+import EmptyState from './EmptyState'
 import SignalBars from './SignalBars'
 import './ResultsPreview.css'
 
 /**
  * Maps one ScreeningCandidateResult (src/api/schemas.py) into the shape
- * CandidateCard expects. The backend now also returns matching_skills,
- * skill_gaps, explanation, candidate_email, and candidate_phone (see
- * schemas.py::ScreeningCandidateResult) -- wired through here so
- * CandidateCard's existing "matched skills" / "skill gaps" / "AI
- * explanation" / contact-icon UI (previously always in its "unavailable"
- * fallback state, since these fields never reached it) actually renders.
- * Score breakdown (skillMatch/experience/roleRelevance) is still not
- * returned by the API, so that section of CandidateCard continues to
- * fall back gracefully.
+ * CandidateCard expects.
  */
 function toCandidateCardProps(result, index) {
   return {
@@ -32,11 +26,29 @@ function toCandidateCardProps(result, index) {
   }
 }
 
-function ResultsPreview({ jobTitle, results, isLoading, error, screeningComplete }) {
+/**
+ * `meta` (optional): { title, organization, department, generatedAt,
+ * status } -- organization/position context that must stay visible
+ * alongside the ranked list, whether these results were just produced
+ * by a fresh run or reopened from history.
+ */
+function ResultsPreview({ jobTitle, results, isLoading, error, screeningComplete, meta }) {
   const hasResults = screeningComplete && results && results.length > 0
+  const showHeader = hasResults && meta
 
   return (
     <section className="results-preview" aria-labelledby="results-preview-heading">
+      {showHeader && (
+        <OrgPositionHeader
+          title={meta.title || jobTitle}
+          organization={meta.organization}
+          department={meta.department}
+          candidatesScreened={results.length}
+          generatedAt={meta.generatedAt}
+          status={meta.status || 'Screened'}
+        />
+      )}
+
       <div className="results-preview__header">
         <div>
           <span className="eyebrow">
@@ -74,19 +86,19 @@ function ResultsPreview({ jobTitle, results, isLoading, error, screeningComplete
       )}
 
       {!isLoading && !error && !screeningComplete && (
-        <div className="results-preview__status results-preview__status--empty">
-          <p className="results-preview__status-text">
-            No screening has been run yet. Your ranked candidates will appear here.
-          </p>
-        </div>
+        <EmptyState
+          icon="⌁"
+          title="No screening has been run yet"
+          body="Fill in the role details and drop in a few resumes above, then run a screening to see your ranked shortlist here."
+        />
       )}
 
       {!isLoading && !error && screeningComplete && !hasResults && (
-        <div className="results-preview__status results-preview__status--empty">
-          <p className="results-preview__status-text">
-            The screening finished, but no candidates could be ranked.
-          </p>
-        </div>
+        <EmptyState
+          icon="⚠"
+          title="The screening finished, but no candidates could be ranked"
+          body="Every uploaded resume failed to process. Check the files and try again."
+        />
       )}
 
       {hasResults && (

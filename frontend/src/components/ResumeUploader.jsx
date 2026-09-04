@@ -3,11 +3,6 @@ import FileAttachment from './FileAttachment'
 import { isAcceptedResumeFile } from '../utils/fileHelpers'
 import './ResumeUploader.css'
 
-/**
- * Multi-file resume uploader. Accepts PDF, DOCX, and TXT files via click
- * or drag-and-drop, and renders each selected file as a removable
- * attachment chip (see FileAttachment).
- */
 function ResumeUploader({ files, onFilesAdded, onFileRemoved }) {
   const [dragActive, setDragActive] = useState(false)
   const inputRef = useRef(null)

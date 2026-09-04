@@ -1,45 +1,56 @@
-Job Description — AI/ML Engineer
+Job Description AI/ML Engineer
 
-Job Title: AI/ML Engineer
+Company: VertexAI Innovations
+Position: AI/ML Engineer
+Department: Artificial Intelligence & Data Science
 Location: Islamabad, Pakistan
-Experience: 2–4 years
 Employment Type: Full-time
+Experience Required: 2–4 years
+Reporting To: Lead AI Engineer
 
-About the Role
+Position Overview
 
-We are looking for an AI/ML Engineer to develop, evaluate, and deploy machine learning solutions. The ideal candidate should have strong Python and machine learning fundamentals, experience with NLP and deep learning, and the ability to build production-ready ML pipelines.
+We are looking for an AI/ML Engineer to design, develop, evaluate, and deploy machine learning solutions. The ideal candidate should have strong Python and machine learning fundamentals, practical experience with NLP and deep learning, and an understanding of production ML systems.
 
-Responsibilities
-
+Key Responsibilities
 Develop and deploy machine learning models using Python.
 Build supervised and unsupervised learning solutions.
-Perform data preprocessing, feature engineering, and exploratory data analysis.
+Perform data preprocessing, exploratory data analysis, and feature engineering.
 Develop classification, regression, and clustering models.
-Build NLP solutions for text/document classification and information extraction.
+Build NLP solutions for text and document classification.
+Work with embeddings and transformer-based models.
 Develop deep learning models using PyTorch or TensorFlow/Keras.
 Evaluate models using cross-validation, precision, recall, F1-score, ROC-AUC, MAE, and RMSE.
-Build reproducible ML pipelines.
-Deploy models through REST APIs using FastAPI and Docker.
+Perform model optimization and error analysis.
+Build reproducible machine learning pipelines.
+Deploy ML models through REST APIs using FastAPI and Docker.
 Work with SQL databases and structured/unstructured datasets.
 Use Git/GitHub for version control and collaborative development.
-Participate in model optimization, error analysis, and experimentation.
-
+Collaborate with data scientists, software engineers, and product teams.
 Required Qualifications
-
 Bachelor's degree in Computer Science, Artificial Intelligence, Data Science, or a related field.
 2+ years of experience in machine learning or data science.
 Strong Python programming skills.
-Experience with scikit-learn, Pandas, NumPy, and machine learning algorithms.
+Experience with scikit-learn, Pandas, and NumPy.
+Knowledge of machine learning algorithms and model evaluation.
+Experience with supervised and unsupervised learning.
 Experience with PyTorch or TensorFlow/Keras.
 Knowledge of NLP, text classification, embeddings, and transformers.
-Experience with supervised and unsupervised learning.
-Understanding of model evaluation and cross-validation.
-Experience with FastAPI, Docker, REST APIs, or similar deployment technologies.
-Working knowledge of SQL and Git/GitHub.
-
+Understanding of cross-validation and model evaluation metrics.
+Experience with FastAPI, Docker, and REST APIs or similar deployment technologies.
+Working knowledge of SQL.
+Experience with Git/GitHub.
 Preferred Qualifications
-
 Experience with AWS or another cloud platform.
 Experience building end-to-end ML systems.
-Familiarity with CI/CD and MLOps practices.
+Familiarity with MLOps and CI/CD practices.
+Experience with production machine learning deployment.
 Strong communication and problem-solving skills.
+What We Offer
+Competitive salary and benefits.
+Opportunities to work on real-world AI/ML products.
+Professional development and technical learning opportunities.
+Collaborative engineering and data science environment.
+Career growth opportunities within the AI & Data Science team.
+
+Application: Candidates should submit a CV highlighting their machine learning experience, technical skills, relevant projects, and deployed ML systems.

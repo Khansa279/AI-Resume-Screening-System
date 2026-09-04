@@ -49,20 +49,12 @@ function BreakdownMeter({ label, value }) {
  *
  * `candidate` fields come straight from the FastAPI ScreeningResponse
  * (see src/api/schemas.py::ScreeningCandidateResult), mapped in
- * ResultsPreview::toCandidateCardProps. The API now provides: rank
- * (derived from result order), name, matchScore, recommendation,
- * requiresHuman, confidence, an optional per-candidate error, email,
- * phone, a free-text explanation (why_summary), matched skills, skill
- * gaps, and a skill/experience/role-relevance breakdown.
- *
- * Not every candidate necessarily has every field (e.g. a candidate with
- * no email on file, or one whose screening predates these fields being
- * persisted) -- each section below is still only rendered when its data
- * is actually present, rather than inventing placeholder values.
+ * ResultsPreview::toCandidateCardProps.
  */
 function CandidateCard({ candidate }) {
   const [expanded, setExpanded] = useState(false)
   const tone = recommendationTone(candidate.recommendation)
+  const isTopRank = candidate.rank === 1 && !candidate.error
 
   const hasContact = Boolean(candidate.email || candidate.phone || candidate.resumeFile)
   const hasSkills = Array.isArray(candidate.matchedSkills) && candidate.matchedSkills.length > 0
@@ -99,7 +91,11 @@ function CandidateCard({ candidate }) {
   }
 
   return (
-    <article className={`candidate-card ${expanded ? 'candidate-card--expanded' : ''}`}>
+    <article
+      className={`candidate-card ${expanded ? 'candidate-card--expanded' : ''} ${
+        isTopRank ? 'candidate-card--top' : ''
+      }`}
+    >
       <div
         className="candidate-card__summary"
         role="button"
@@ -108,7 +104,10 @@ function CandidateCard({ candidate }) {
         onKeyDown={handleKeyDown}
         aria-expanded={expanded}
       >
-        <span className="candidate-card__rank">{String(candidate.rank).padStart(2, '0')}</span>
+        <span className="candidate-card__rank">
+          {isTopRank ? <span className="candidate-card__rank-star" aria-hidden="true">★</span> : null}
+          {String(candidate.rank).padStart(2, '0')}
+        </span>
 
         <ScoreRing score={candidate.matchScore} />
 

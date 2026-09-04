@@ -4,13 +4,23 @@ import { isAcceptedJobDescriptionFile } from '../utils/fileHelpers'
 import './JobDescriptionForm.css'
 
 /**
- * Job title + job description input.
+ * Organization / position / job-description input.
  *
  * The job description can be provided either as typed text OR as an
  * uploaded .txt file -- the two are mutually exclusive: uploading a file
  * clears/disables the textarea, and clearing the file re-enables typing.
+ *
+ * Organization and department are optional (the backend files a job
+ * under a default bucket when omitted), but surfacing them here is what
+ * lets the resulting screening carry real "CureMD / AI Engineering"
+ * context instead of a generic placeholder throughout the rest of the
+ * product (results header, screening history).
  */
 function JobDescriptionForm({
+  organization,
+  onOrganizationChange,
+  department,
+  onDepartmentChange,
   jobTitle,
   onJobTitleChange,
   jobDescriptionText,
@@ -49,6 +59,36 @@ function JobDescriptionForm({
 
   return (
     <section className="jd-form">
+      <div className="field-row">
+        <div className="field-group">
+          <label htmlFor="organization" className="field-label">
+            Organization
+          </label>
+          <input
+            id="organization"
+            type="text"
+            className="text-input"
+            placeholder="e.g. CureMD"
+            value={organization}
+            onChange={(event) => onOrganizationChange(event.target.value)}
+          />
+        </div>
+
+        <div className="field-group">
+          <label htmlFor="department" className="field-label">
+            Department <span className="field-hint">(optional)</span>
+          </label>
+          <input
+            id="department"
+            type="text"
+            className="text-input"
+            placeholder="e.g. AI Engineering"
+            value={department}
+            onChange={(event) => onDepartmentChange(event.target.value)}
+          />
+        </div>
+      </div>
+
       <div className="field-group">
         <label htmlFor="job-title" className="field-label">
           Job Title
