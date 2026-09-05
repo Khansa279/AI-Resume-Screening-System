@@ -26,6 +26,7 @@ from .base import BaseAgent
 from ..config import get_config
 from ..embeddings import embedding_relevance
 from ..models import ResumeData, JobRequirements, ExperienceEvaluation, WorkExperience
+from ..skill_matching import match_requirement_against_snippets as match_skill_requirement_against_snippets
 from ..skill_taxonomy import (
     canonical_skill_key,
     normalize_skill_text,
@@ -654,11 +655,39 @@ def job_relevance(exp: WorkExperience, requirements: JobRequirements) -> float:
         text_blob = normalize_skill_text(
             " ".join([exp.title, " ".join(exp.technologies), " ".join(exp.responsibilities)])
         )
-        mentioned = 0
+        # Individual candidate evidence snippets (NOT one joined blob)
+        # for the generalized semantic fallback below. Each requirement
+        # is checked against each snippet separately and the single BEST
+        # result is kept -- see match_requirement_against_snippets'
+        # docstring for why comparing against the whole concatenated
+        # text would dilute embedding similarity and silently under-score
+        # a genuine one-sentence match.
+        candidate_evidence_snippets = (
+            [exp.title] if exp.title else []
+        ) + list(exp.technologies or []) + list(exp.responsibilities or [])
+        mentioned = 0.0
         for req in requirements.required_skills:
             req_keys = normalize_requirement_skills(req)
             if any(k and re.search(rf"(?<!\S){re.escape(k)}(?!\S)", text_blob) for k in req_keys):
-                mentioned += 1
+                mentioned += 1.0
+                continue
+            # GENERALIZED SEMANTIC FALLBACK (src/skill_matching.py): only
+            # consulted when the deterministic taxonomy/literal-phrase
+            # check just above found NOTHING for this specific
+            # requirement. This is what lets a non-technical requirement
+            # (e.g. "SEO and keyword research") get credit from a
+            # candidate's differently-worded evidence ("Performed
+            # keyword research and on-page SEO optimization") without
+            # needing skill_taxonomy.py to grow a hardcoded entry for
+            # every domain, and without needing the exact phrase to
+            # appear verbatim in the same word order. It only ever ADDS
+            # credit here -- when no embedding provider is configured
+            # (this project's default), match_requirement() returns a
+            # 0.0-credit decision and `mentioned` is completely
+            # unaffected, so a tech-domain candidate whose taxonomy
+            # coverage was already complete sees zero behavior change.
+            decision = match_skill_requirement_against_snippets(req, candidate_evidence_snippets)
+            mentioned += decision.credit
         if requirements.required_skills:
             skill_hit = max(skill_hit, mentioned / len(requirements.required_skills))
 
